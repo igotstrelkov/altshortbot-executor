@@ -15,6 +15,7 @@
 
 import { readFileSync, writeFileSync, existsSync, appendFileSync } from "fs";
 import { ExchangeClient, HttpTransport } from "@nktkas/hyperliquid";
+import { formatPrice, formatSize } from "@nktkas/hyperliquid/utils";
 import { privateKeyToAccount } from "viem/accounts";
 import type {
   QueuedSignal,
@@ -177,25 +178,8 @@ function getExchangeClient(): ExchangeClient {
   });
 }
 
-// Hyperliquid perp price rules: max (6 - szDecimals) decimal places AND max 5
-// significant figures. The plan's hard-coded .toFixed(4) is correct only for
-// szDecimals ≤ 2 (most altcoins, ORDI etc.) — fails for szDecimals ≥ 3.
-function formatPrice(price: number, szDecimals: number): string {
-  const decByDp = Math.max(0, 6 - szDecimals);
-  // 5-sig-fig cap only bites for price >= 1 (sub-1 prices: leading zeros after
-  // decimal don't count, and sub-$0.001 coins are filtered upstream by the scanner).
-  let decBySig = decByDp;
-  if (price >= 1) {
-    const intDigits = Math.floor(Math.log10(price)) + 1;
-    decBySig = Math.max(0, 5 - intDigits);
-  }
-  return price.toFixed(Math.min(decByDp, decBySig));
-}
-
-function formatSize(size: number, szDecimals: number): string {
-  // Size must be a multiple of 10^-szDecimals on Hyperliquid.
-  return size.toFixed(szDecimals > 4 ? 4 : szDecimals);
-}
+// Price/size formatters come from the SDK (@nktkas/hyperliquid/utils) and
+// stay in sync with whatever Hyperliquid changes about tick/lot rules.
 
 async function openShort(
   assetIdx:   number,
@@ -203,6 +187,7 @@ async function openShort(
   sizeCoin:   number,
   markPrice:  number,
   leverage:   number,
+  coin:       string,        // for alerting on leverage failure
 ): Promise<number | null> {
   if (IS_PAPER) return -1;
 
@@ -221,8 +206,16 @@ async function openShort(
       leverage,
     });
   } catch (err) {
-    console.error(`updateLeverage failed for asset ${assetIdx}: ${(err as Error).message}`);
-    return null;  // do not open at unknown leverage
+    const msg = (err as Error).message;
+    console.error(`updateLeverage failed for ${coin}: ${msg}`);
+    // Surface the failure on Telegram — silent skips would look like a dry
+    // spell in production. Operator can investigate (leverage cap mismatch?
+    // network blip? account permission?) immediately.
+    await sendTelegram(
+      `⚠️ *${coin}* — updateLeverage(${leverage}×) failed: ${msg}\n` +
+      `Position NOT opened. Signal skipped to avoid trading at unknown leverage.`
+    );
+    return null;
   }
 
   const limitPx = formatPrice(markPrice * 0.995, szDecimals);
@@ -407,7 +400,7 @@ async function executeSignal(
   if (IS_PAPER) {
     console.log(`📝 [PAPER] Short ${coin} @ $${markPx.toFixed(4)} | size: ${size} | stop: $${stopLossPx.toFixed(4)}`);
   } else {
-    const oid = await openShort(asset.idx, asset.szDecimals, size, markPx, leverage);
+    const oid = await openShort(asset.idx, asset.szDecimals, size, markPx, leverage, coin);
     if (oid === null) { console.log(`${coin}: order failed`); return; }
 
     stopOid = await placeStopLoss(asset.idx, asset.szDecimals, size, stopLossPx) ?? undefined;
