@@ -445,4 +445,129 @@ async function executeSignal(
   );
 }
 
-// Stages 8-9 will add: position management, status command, and the main loop.
+// ─── Position management ─────────────────────────────────────────────────────
+// Runs every executor cycle, regardless of new signals. Reconciles local state
+// with exchange (catches positions closed by exchange-side stops), then
+// applies breakeven/trailing/target/timeout rules to each open position.
+async function managePositions(
+  positions:  PositionStore,
+  assetIndex: Map<string, { idx: number; szDecimals: number; maxLeverage: number }>,
+  markPrices: Map<string, number>,
+): Promise<void> {
+
+  // Live mode: reconcile with exchange. Without this, a stop fired on the
+  // exchange would leave a ghost entry in hl_positions.json — and the next
+  // signal for that coin would be skipped by the "already in position" guard.
+  if (!IS_PAPER && WALLET_ADDRESS) {
+    try {
+      const accountState = await fetchAccountState();
+      const liveCoins    = new Set(
+        accountState.assetPositions
+          .filter(p => parseFloat(p.position.szi) !== 0)
+          .map(p => p.position.coin)
+      );
+      for (const coin of Object.keys(positions)) {
+        if (!liveCoins.has(coin)) {
+          // Position closed on exchange (stop triggered, liquidated, or
+          // manually closed via the HL UI).
+          const pos     = positions[coin];
+          const markPx  = markPrices.get(coin) ?? pos.entryPx;
+          const pnlPct  = (pos.entryPx - markPx) / pos.entryPx * 100;
+          const pnlUsdc = (pos.entryPx - markPx) * pos.sizeCoin;
+          console.log(`${coin}: closed on exchange (stop/liq) Est. PnL: ${pnlPct.toFixed(1)}%`);
+          await sendTelegram(
+            `🔔 *${coin} CLOSED ON EXCHANGE*\n` +
+            `Entry: $${pos.entryPx.toFixed(4)} → Mark: $${markPx.toFixed(4)}\n` +
+            `Est. P&L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}% ($${pnlUsdc >= 0 ? "+" : ""}${pnlUsdc.toFixed(2)})\n` +
+            `Reason: stop-loss triggered or liquidated`
+          );
+          delete positions[coin];
+        }
+      }
+    } catch (err) {
+      console.error(`Reconciliation failed: ${(err as Error).message}`);
+      // Non-fatal — continue managing with stale state. Next run retries.
+    }
+  }
+
+  for (const [coin, pos] of Object.entries(positions)) {
+    const markPx = markPrices.get(coin);
+    if (markPx === undefined) continue;
+
+    const pnlPct    = (pos.entryPx - markPx) / pos.entryPx * 100;  // positive = profit
+    const hoursHeld = (Date.now() - pos.openedAt) / 3_600_000;
+    const asset     = assetIndex.get(coin);
+    if (!asset) continue;
+
+    let closeReason: "stop" | "target" | "trailing" | "timeout" | null = null;
+
+    // Paper-mode stop check. Live mode relies on the exchange's resting stop;
+    // reconciliation above catches the close when it fires.
+    if (IS_PAPER && markPx >= pos.stopLossPx) closeReason = "stop";
+
+    // Move stop to breakeven once we've banked breakevenAtPct of profit.
+    if (!pos.trailingActive && pnlPct >= RISK.breakevenAtPct * 100) {
+      const newStop = pos.entryPx * 1.005;  // entry + 0.5% buffer
+      if (!IS_PAPER && pos.stopOid) {
+        await cancelOrder(asset.idx, pos.stopOid);
+        const newOid = await placeStopLoss(asset.idx, asset.szDecimals, pos.sizeCoin, newStop);
+        pos.stopOid = newOid ?? undefined;
+      }
+      pos.stopLossPx     = newStop;
+      pos.trailingActive = true;
+      console.log(`${coin}: stop → breakeven $${newStop.toFixed(4)} (${pnlPct.toFixed(1)}% profit)`);
+      await sendTelegram(`🔄 *${coin}* stop moved to breakeven $${newStop.toFixed(4)} (${pnlPct.toFixed(1)}% profit)`);
+    }
+
+    // Trail the stop down as price falls further.
+    if (pos.trailingActive) {
+      const trailingStop = markPx * (1 + RISK.trailingStopPct);
+      if (trailingStop < pos.stopLossPx) {
+        if (!IS_PAPER && pos.stopOid) {
+          await cancelOrder(asset.idx, pos.stopOid);
+          const newOid = await placeStopLoss(asset.idx, asset.szDecimals, pos.sizeCoin, trailingStop);
+          pos.stopOid = newOid ?? undefined;
+        }
+        pos.stopLossPx = trailingStop;
+      }
+    }
+
+    if (!closeReason && hoursHeld >= RISK.maxHoldHours) closeReason = "timeout";
+
+    // Target hit (paper mode only — live could use a TP order; not implemented).
+    if (!closeReason && IS_PAPER && markPx <= pos.targetPx) closeReason = "target";
+
+    if (closeReason) {
+      if (!IS_PAPER) {
+        if (pos.stopOid) await cancelOrder(asset.idx, pos.stopOid);
+        await closePosition(asset.idx, asset.szDecimals, pos.sizeCoin, markPx);
+      }
+
+      const pnlUsdc = (pos.entryPx - markPx) * pos.sizeCoin;
+      const emoji   = pnlUsdc >= 0 ? "✅" : "❌";
+
+      if (IS_PAPER) {
+        logPaperTrade({
+          coin, openedAt: pos.openedAt, closedAt: Date.now(),
+          entryPx: pos.entryPx, exitPx: markPx,
+          sizeCoin: pos.sizeCoin,
+          pnlUsdc, pnlPct,
+          closeReason,
+          signalType: pos.signalType, confidence: pos.signalConfidence,
+        });
+      }
+
+      await sendTelegram(
+        `${IS_PAPER ? "📝 [PAPER] " : ""}${emoji} *${coin} CLOSED (${closeReason})*\n` +
+        `Entry: $${pos.entryPx.toFixed(4)} → Exit: $${markPx.toFixed(4)}\n` +
+        `P&L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}% ($${pnlUsdc >= 0 ? "+" : ""}${pnlUsdc.toFixed(2)})\n` +
+        `Held: ${hoursHeld.toFixed(1)}h`
+      );
+
+      delete positions[coin];
+      console.log(`${coin}: closed (${closeReason}) PnL: ${pnlPct.toFixed(1)}%`);
+    }
+  }
+}
+
+// Stage 9 will add: status command and the main loop.
