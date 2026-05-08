@@ -1,0 +1,7 @@
+node_modules/
+logs/
+scanner_state.json
+signal_queue.json
+hl_positions.json
+paper_trades.jsonl
+.env
