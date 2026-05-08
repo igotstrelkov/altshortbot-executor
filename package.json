@@ -3,5 +3,9 @@
     "@types/node": "^25.6.2",
     "tsx": "^4.21.0",
     "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "@nktkas/hyperliquid": "^0.32.2",
+    "viem": "^2.48.11"
   }
 }

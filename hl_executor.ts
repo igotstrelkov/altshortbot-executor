@@ -14,6 +14,8 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, appendFileSync } from "fs";
+import { ExchangeClient, HttpTransport } from "@nktkas/hyperliquid";
+import { privateKeyToAccount } from "viem/accounts";
 import type {
   QueuedSignal,
   PositionStore,
@@ -160,6 +162,160 @@ async function fetchMarkPrices(): Promise<Map<string, number>> {
   return map;
 }
 
-// Stages 5-9 will add: order execution, position sizing, signal execution,
-// position management, status command, and the main loop. Until then the
-// constants, state helpers, and HL fetchers above are intentionally unused.
+// ─── Hyperliquid order execution (signed /exchange endpoint, agent key) ──────
+// EIP-712 action hashing on Hyperliquid uses msgpack with strict key ordering;
+// the SDK handles this. Do NOT roll signing manually.
+
+function getExchangeClient(): ExchangeClient {
+  if (!AGENT_KEY) throw new Error("HL_AGENT_KEY not set");
+  const wallet = privateKeyToAccount(AGENT_KEY as `0x${string}`);
+  // The agent wallet is approved via app.hyperliquid.xyz → Settings → API.
+  // Hyperliquid maps agent → approver internally; no vaultAddress needed.
+  return new ExchangeClient({
+    transport: new HttpTransport({ isTestnet: IS_TESTNET }),
+    wallet,
+  });
+}
+
+// Hyperliquid perp price rules: max (6 - szDecimals) decimal places AND max 5
+// significant figures. The plan's hard-coded .toFixed(4) is correct only for
+// szDecimals ≤ 2 (most altcoins, ORDI etc.) — fails for szDecimals ≥ 3.
+function formatPrice(price: number, szDecimals: number): string {
+  const decByDp = Math.max(0, 6 - szDecimals);
+  // 5-sig-fig cap only bites for price >= 1 (sub-1 prices: leading zeros after
+  // decimal don't count, and sub-$0.001 coins are filtered upstream by the scanner).
+  let decBySig = decByDp;
+  if (price >= 1) {
+    const intDigits = Math.floor(Math.log10(price)) + 1;
+    decBySig = Math.max(0, 5 - intDigits);
+  }
+  return price.toFixed(Math.min(decByDp, decBySig));
+}
+
+function formatSize(size: number, szDecimals: number): string {
+  // Size must be a multiple of 10^-szDecimals on Hyperliquid.
+  return size.toFixed(szDecimals > 4 ? 4 : szDecimals);
+}
+
+async function openShort(
+  assetIdx:   number,
+  szDecimals: number,
+  sizeCoin:   number,
+  markPrice:  number,
+): Promise<number | null> {
+  if (IS_PAPER) return -1;
+
+  const client  = getExchangeClient();
+  const limitPx = formatPrice(markPrice * 0.995, szDecimals);
+  const sizeStr = formatSize(sizeCoin, szDecimals);
+
+  try {
+    const result = await client.order({
+      orders: [{
+        a: assetIdx,
+        b: false,                    // false = sell (short)
+        p: limitPx,
+        s: sizeStr,
+        r: false,                    // not reduce-only — opening new position
+        t: { limit: { tif: "Ioc" } },// IOC = fill immediately or cancel
+      }],
+      grouping: "na",
+    });
+    const status = result.response.data.statuses[0];
+    if (typeof status === "object" && "filled" in status) {
+      // IOC may partially fill. status.filled.totalSz is the actual filled size.
+      // For simplicity we proceed with the full requested size — the stop-loss
+      // will be slightly oversized on a partial fill, erring toward protection.
+      return status.filled.oid;
+    }
+    if (typeof status === "object" && "resting" in status) return status.resting.oid;
+    console.error(`Order status: ${JSON.stringify(status)}`);
+    return null;
+  } catch (err) {
+    console.error(`openShort failed: ${(err as Error).message}`);
+    return null;
+  }
+}
+
+async function placeStopLoss(
+  assetIdx:   number,
+  szDecimals: number,
+  sizeCoin:   number,
+  stopPx:     number,
+): Promise<number | null> {
+  if (IS_PAPER) return -1;
+
+  const client  = getExchangeClient();
+  const stopStr = formatPrice(stopPx, szDecimals);
+  const sizeStr = formatSize(sizeCoin, szDecimals);
+
+  try {
+    const result = await client.order({
+      orders: [{
+        a: assetIdx,
+        b: true,                     // buy to close short
+        p: stopStr,
+        s: sizeStr,
+        r: true,                     // reduce-only
+        t: {
+          trigger: {
+            triggerPx: stopStr,
+            isMarket:  true,
+            tpsl:      "sl",
+          },
+        },
+      }],
+      grouping: "na",
+    });
+    const status = result.response.data.statuses[0];
+    if (typeof status === "object" && "resting" in status) return status.resting.oid;
+    console.error(`Stop-loss status: ${JSON.stringify(status)}`);
+    return null;
+  } catch (err) {
+    console.error(`placeStopLoss failed: ${(err as Error).message}`);
+    return null;
+  }
+}
+
+async function cancelOrder(assetIdx: number, oid: number): Promise<void> {
+  if (IS_PAPER || oid === -1) return;
+  const client = getExchangeClient();
+  try {
+    await client.cancel({ cancels: [{ a: assetIdx, o: oid }] });
+  } catch (err) {
+    console.error(`cancelOrder failed: ${(err as Error).message}`);
+  }
+}
+
+async function closePosition(
+  assetIdx:   number,
+  szDecimals: number,
+  sizeCoin:   number,
+  markPx:     number,
+): Promise<void> {
+  if (IS_PAPER) return;
+
+  const client  = getExchangeClient();
+  const limitPx = formatPrice(markPx * 1.005, szDecimals);
+  const sizeStr = formatSize(sizeCoin, szDecimals);
+
+  try {
+    await client.order({
+      orders: [{
+        a: assetIdx,
+        b: true,                     // buy to close short
+        p: limitPx,
+        s: sizeStr,
+        r: true,                     // reduce-only
+        t: { limit: { tif: "Ioc" } },
+      }],
+      grouping: "na",
+    });
+  } catch (err) {
+    console.error(`closePosition failed: ${(err as Error).message}`);
+  }
+}
+
+// Stages 6-9 will add: position sizing, signal execution, position management,
+// status command, and the main loop. Until then the constants, state helpers,
+// HL fetchers, and order helpers above are intentionally unused.
