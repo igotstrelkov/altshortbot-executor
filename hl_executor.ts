@@ -363,5 +363,86 @@ function calcPositionSize(
   return Math.floor(rawSize * factor) / factor;
 }
 
-// Stages 7-9 will add: signal execution, position management, status command,
-// and the main loop.
+// ─── Signal execution ────────────────────────────────────────────────────────
+async function executeSignal(
+  signal:       QueuedSignal,
+  assetIndex:   Map<string, { idx: number; szDecimals: number; maxLeverage: number }>,
+  markPrices:   Map<string, number>,
+  positions:    PositionStore,
+  accountValue: number,
+): Promise<void> {
+  const { coin, type, confidence, entry } = signal;
+
+  // Validation guards.
+  // confidence === "LOW" check is defense-in-depth — the scanner queue filter
+  // already excludes LOW (Stage 1c), but a corrupted queue file could carry one.
+  if (!TRADEABLE.has(type))    { console.log(`${coin}: not tradeable (${type})`); return; }
+  if (confidence === "LOW")    { console.log(`${coin}: LOW confidence — skip`); return; }
+  if (positions[coin])         { console.log(`${coin}: already in position`); return; }
+  if (Object.keys(positions).length >= RISK.maxPositions) {
+    console.log(`Max positions (${RISK.maxPositions}) reached — skip ${coin}`);
+    return;
+  }
+
+  const asset = assetIndex.get(coin);
+  if (!asset) { console.log(`${coin}: not listed on Hyperliquid`); return; }
+
+  // Use mark price (current state) for sizing, not signal.entry (potentially stale
+  // by up to 5 minutes between scanner write and executor pickup).
+  const markPx = markPrices.get(coin) ?? entry;
+
+  const size     = calcPositionSize(accountValue, markPx, asset.szDecimals);
+  const notional = size * markPx;
+  if (notional < RISK.minNotionalUsdc) {
+    console.log(`${coin}: notional $${notional.toFixed(2)} below minimum $${RISK.minNotionalUsdc}`);
+    return;
+  }
+
+  const stopLossPx = markPx * (1 + RISK.stopLossPct);
+  const targetPx   = markPx * (1 - RISK.initialTargetPct);
+  const leverage   = Math.min(RISK.maxLeverage, asset.maxLeverage);
+
+  let stopOid: number | undefined = undefined;
+
+  if (IS_PAPER) {
+    console.log(`📝 [PAPER] Short ${coin} @ $${markPx.toFixed(4)} | size: ${size} | stop: $${stopLossPx.toFixed(4)}`);
+  } else {
+    const oid = await openShort(asset.idx, asset.szDecimals, size, markPx, leverage);
+    if (oid === null) { console.log(`${coin}: order failed`); return; }
+
+    stopOid = await placeStopLoss(asset.idx, asset.szDecimals, size, stopLossPx) ?? undefined;
+    if (stopOid === undefined) {
+      // Stop-loss failed — close immediately to avoid an unprotected short.
+      await closePosition(asset.idx, asset.szDecimals, size, markPx);
+      await sendTelegram(`⚠️ *${coin}* — stop-loss placement failed. Position closed for safety.`);
+      return;
+    }
+    console.log(`✅ Short ${coin} @ $${markPx.toFixed(4)} | oid=${oid} stopOid=${stopOid} lev=${leverage}×`);
+  }
+
+  positions[coin] = {
+    coin,
+    openedAt:         Date.now(),
+    entryPx:          markPx,
+    sizeCoin:         size,
+    notionalUsdc:     notional,
+    stopLossPx,
+    targetPx,
+    trailingActive:   false,
+    signalType:       type       as "EXHAUSTION" | "TREND_BREAK",
+    signalConfidence: confidence as "HIGH" | "MEDIUM",
+    stopOid,
+    isPaper:          IS_PAPER,
+  };
+
+  await sendTelegram(
+    `${IS_PAPER ? "📝 [PAPER]" : "✅"} *SHORT OPENED — ${coin}*\n` +
+    `Entry: $${markPx.toFixed(4)}\n` +
+    `Size: ${size} ${coin} ($${notional.toFixed(0)})\n` +
+    `Stop: $${stopLossPx.toFixed(4)} (+${(RISK.stopLossPct * 100).toFixed(0)}%)\n` +
+    `Target: $${targetPx.toFixed(4)} (-${(RISK.initialTargetPct * 100).toFixed(0)}%)\n` +
+    `Signal: ${type} [${confidence}]`
+  );
+}
+
+// Stages 8-9 will add: position management, status command, and the main loop.
