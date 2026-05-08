@@ -121,11 +121,11 @@ interface AssetMeta {
   isDelisted?: boolean;
 }
 
-async function fetchAssetIndex(): Promise<Map<string, { idx: number; szDecimals: number }>> {
+async function fetchAssetIndex(): Promise<Map<string, { idx: number; szDecimals: number; maxLeverage: number }>> {
   const { universe } = await hlPost({ type: "meta" }) as { universe: AssetMeta[] };
-  const map = new Map<string, { idx: number; szDecimals: number }>();
+  const map = new Map<string, { idx: number; szDecimals: number; maxLeverage: number }>();
   universe.forEach((a, idx) => {
-    if (!a.isDelisted) map.set(a.name, { idx, szDecimals: a.szDecimals });
+    if (!a.isDelisted) map.set(a.name, { idx, szDecimals: a.szDecimals, maxLeverage: a.maxLeverage });
   });
   return map;
 }
@@ -202,10 +202,29 @@ async function openShort(
   szDecimals: number,
   sizeCoin:   number,
   markPrice:  number,
+  leverage:   number,
 ): Promise<number | null> {
   if (IS_PAPER) return -1;
 
   const client  = getExchangeClient();
+
+  // Set leverage BEFORE the order. HL leverage is per-position-at-entry: if
+  // we don't set it, HL uses whatever was last set for this asset (default
+  // can be 20×). Our notional sizing is correct either way, but a higher-than-
+  // expected leverage means a closer-than-expected liquidation price, which
+  // could trip BEFORE our 12% stop fires. Caller must pre-clamp leverage
+  // against asset.maxLeverage — HL rejects values above the asset cap.
+  try {
+    await client.updateLeverage({
+      asset:    assetIdx,
+      isCross:  true,
+      leverage,
+    });
+  } catch (err) {
+    console.error(`updateLeverage failed for asset ${assetIdx}: ${(err as Error).message}`);
+    return null;  // do not open at unknown leverage
+  }
+
   const limitPx = formatPrice(markPrice * 0.995, szDecimals);
   const sizeStr = formatSize(sizeCoin, szDecimals);
 
@@ -316,6 +335,33 @@ async function closePosition(
   }
 }
 
-// Stages 6-9 will add: position sizing, signal execution, position management,
-// status command, and the main loop. Until then the constants, state helpers,
-// HL fetchers, and order helpers above are intentionally unused.
+// ─── Position sizing ──────────────────────────────────────────────────────────
+// Sized to risk exactly riskPerTrade of account on the stop loss.
+//   We want:  notional × stopLossPct = riskUsd
+//   So:       notional = riskUsd / stopLossPct
+//                      = (accountValue × riskPerTrade) / stopLossPct
+//
+// At account=$10k, riskPerTrade=0.02, stopLossPct=0.12:
+//   notional = $1,667 → loss at +12% stop = $200 = 2% of account ✓
+//
+// Leverage does NOT enter sizing. It only determines margin posted:
+// margin = notional / leverage (e.g. $1,667 / 3 = $556). RISK.maxLeverage stays
+// informational and would be used for a future margin-sufficiency check
+// (margin > withdrawable → reject). This is a deliberate departure from the
+// plan's `notional = marginUsed × maxLeverage`, which inflated notional by 3×
+// and risked 6% per trade despite the 2% riskPerTrade label.
+function calcPositionSize(
+  accountValueUsdc: number,
+  markPrice:        number,
+  szDecimals:       number,
+): number {
+  const riskUsd  = accountValueUsdc * RISK.riskPerTrade;
+  const notional = riskUsd / RISK.stopLossPct;
+  const rawSize  = notional / markPrice;
+  // Round DOWN to szDecimals precision (never up — could push notional over budget).
+  const factor = Math.pow(10, szDecimals);
+  return Math.floor(rawSize * factor) / factor;
+}
+
+// Stages 7-9 will add: signal execution, position management, status command,
+// and the main loop.
