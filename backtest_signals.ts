@@ -904,7 +904,25 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
   const { merged: rawFundingByHour, source: fundingSource } =
     mergeToHighestFunding(funding, bybitFunding);
 
-  // Fill any gaps in the merged map with 0
+  // Fill any gaps in the merged map with 0.
+  //
+  // ⚠️  REPRESENTATIONAL ARTIFACT — does not match live_scanner.ts.
+  // Bybit settles every 4h or 8h; only those timestamps are populated by
+  // mergeToHighestFunding. Zero-filling the gaps means that during a deep
+  // squeeze, fundingApr alternates between e.g. -1500% (settlement hour) and
+  // 0% (every gap hour). The 0% gap satisfies the EXHAUSTION conjunction
+  // (-20 < apr < 5 AND lowerHigh AND momentum-fading) one hour after each
+  // settlement, so EXHAUSTION fires repeatedly inside an active squeeze.
+  // It coincides with squeeze peaks BY TIMING COINCIDENCE (8h cadence aligns
+  // with the move) — not because funding actually normalised. backtest_test.ts
+  // assertions like "EXHAUSTION at 05-02 09:00 PUMP+DUMP" rely on this artifact.
+  //
+  // live_scanner.ts forward-fills the last settlement rate instead, which is
+  // semantically truer (the published rate is the rate-in-effect between
+  // settlements). As a consequence, the live scanner fires far fewer EXHAUSTION
+  // signals than this backtest reports — the backtest's EXHAUSTION win rates
+  // do NOT transfer to live behaviour. If you ever want the backtest to model
+  // live behaviour faithfully, change this to forward-fill and re-tune PARAMS.
   for (let ts = floorH(fetchFrom); ts <= nowMs; ts += 3_600_000) {
     if (rawFundingByHour[ts] === undefined) rawFundingByHour[ts] = 0;
   }

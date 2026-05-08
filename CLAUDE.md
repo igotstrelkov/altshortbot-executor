@@ -52,9 +52,17 @@ PM2 (production): `pm2 start ecosystem.config.js && pm2 save`. Scanner cron is `
 
 `backtest_signals.ts` and `live_scanner.ts` independently implement the same signal logic. Parameters in `live_scanner.ts` (the `PARAMS` object) are the **validated set** from backtest tuning across HYPER, HIVE, KNC, WIF, BSB, SPK, ENJ, ORDI, DASH. Do **not** tune `PARAMS` directly without first re-running the backtest and the fixture regression tests — the values are co-dependent and tuned together.
 
-Funding-rate sourcing differs:
-- **Backtest**: merges Binance + Bybit, picks the largest absolute value per hour.
-- **Live scanner**: Bybit-only, with per-hour forward-fill across the 4h/8h settlement intervals (otherwise 7 of 8 hours read as 0).
+Two real divergences worth knowing about:
+
+1. **Funding source**. Backtest merges Binance + Bybit (largest absolute value per hour); live scanner is Bybit-only. This turns out to be cosmetic on the validated coin set — both venues agree on direction during squeezes — so it does not explain signal-count differences.
+
+2. **Gap-fill semantics — this *does* explain signal differences.** Bybit settles every 4h or 8h. Between settlements:
+   - **Backtest** zero-fills (see warning comment in `backtest_signals.ts` near `mergeToHighestFunding`).
+   - **Live scanner** forward-fills the last settlement rate (`buildFundingByHour`).
+
+   During a deep squeeze with funding at -1500%, the backtest's zero-fill makes `fundingApr` flip to 0 at every non-settlement hour, which satisfies the EXHAUSTION conjunction (`-20 < apr < 5`) and fires alerts that look like "funding normalised" but are actually post-settlement gaps inside an active squeeze. Those alerts coincide with squeeze peaks by timing coincidence (settlement cadence aligns with the move). The live scanner does not fire these — its forward-fill keeps the rate at -1500% throughout the gap, blocking false EXHAUSTION.
+
+   **Consequence:** `backtest_test.ts` EXHAUSTION assertions (e.g. KNC at 2026-05-02 09:00) rely on this artifact and **do not transfer to live behaviour**. `scanner_test.ts` is calibrated to actual live-scanner output, which is sparser but semantically truthful. Backtest EXHAUSTION win-rate numbers should be treated with skepticism for the same reason — the timing is real, the stated cause is not.
 
 ### Signal types, confidence, and what gets queued
 

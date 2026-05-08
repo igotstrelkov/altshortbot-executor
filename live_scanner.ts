@@ -1,4 +1,5 @@
 import { writeFileSync, readFileSync, existsSync } from "fs";
+import { fileURLToPath } from "url";
 import type { Alert, QueuedSignal } from "./shared_types.ts";
 
 /**
@@ -696,4 +697,12 @@ async function watchMode(): Promise<void> {
   }
 }
 
-process.argv.includes("--watch") ? watchMode() : main();
+// Run only when this file is the entry point (allows scanner_test.ts to import
+// scanCoin without triggering a full live scan).
+const __filename = fileURLToPath(import.meta.url);
+if (process.argv[1] === __filename) {
+  process.argv.includes("--watch") ? watchMode() : main();
+}
+
+export { scanCoin, defaultState, buildFundingByHour };
+export type { CoinState };
