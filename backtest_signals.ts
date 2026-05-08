@@ -13,7 +13,7 @@ import { writeFileSync } from "fs";
  *   npx tsx backtest_signals.ts --coin ORDI --days 30 \
  *     --threshold 10 --min-positive 2 --min-oi 2 --max-price 2 \
  *     --pump-pct 25 --pump-vol 5 --pump-rsi 88 --pump-funding 0 \
- *     --squeeze-pct 20 --squeeze-hours 10 --squeeze-funding -100 --squeeze-oi-drop 0 \
+ *     --squeeze-pct 20 --squeeze-hours 10 --squeeze-funding -100 --squeeze-oi-drop 3 \
  *     --lookahead 48 --chart
  *
  * ── PARAMETER REFERENCE ─────────────────────────────────────────────────────
@@ -102,6 +102,7 @@ interface Config {
   squeezeHours: number;
   squeezeMaxFundingApr: number; // funding must be BELOW this to count as building (default -100%)
   exhaustMaxFundingApr: number; // funding must be ABOVE this to count as exhaustion (default -20%)
+  exhaustMinOiDrop: number; // OI must have dropped this % for exhaustion to fire (0 = disabled)
   squeezeMinOiDrop: number;
   trendFilter: boolean;
   trendDays7Pct: number;
@@ -608,10 +609,13 @@ function detectShortSqueeze(
   const cumulativePct =
     startClose > 0 ? ((windowHigh - startClose) / startClose) * 100 : 0;
 
-  // OI drop — only checked when squeezeMinOiDrop > 0
+  // OI drop — computed when squeezeMinOiDrop OR exhaustMinOiDrop > 0
   // (USD OI is unreliable during squeezes because price rise inflates it)
   let oiDropPct = 0;
-  if (config.squeezeMinOiDrop > 0 && oiSeriesArr.length >= 2) {
+  if (
+    (config.squeezeMinOiDrop > 0 || config.exhaustMinOiDrop > 0) &&
+    oiSeriesArr.length >= 2
+  ) {
     const oiStart = oiSeriesArr[Math.max(0, oiSeriesArr.length - N - 1)];
     const oiNow = oiSeriesArr[oiSeriesArr.length - 1];
     oiDropPct = oiStart > 0 ? ((oiStart - oiNow) / oiStart) * 100 : 0;
@@ -620,6 +624,8 @@ function detectShortSqueeze(
   const fundingApr = fundingNow * 8760 * 100;
   const oiOk =
     config.squeezeMinOiDrop <= 0 || oiDropPct >= config.squeezeMinOiDrop;
+  const exhaustOiOk =
+    config.exhaustMinOiDrop <= 0 || oiDropPct >= config.exhaustMinOiDrop;
 
   const isSqueeze =
     cumulativePct >= config.squeezeMinPct &&
@@ -649,7 +655,8 @@ function detectShortSqueeze(
     fundingApr > exhaustMaxFunding && // must be above -20% (genuinely normalised)
     fundingApr < 5 && // not yet strongly positive
     recentAvg < avgCandleMove * 0.5 &&
-    lowerHigh;
+    lowerHigh &&
+    exhaustOiOk; // OI must have dropped if --exhaust-oi-drop > 0
 
   if (isSqueeze)
     return {
@@ -2315,6 +2322,7 @@ interface Args {
   squeezeHours: number;
   squeezeMaxFundingApr: number; // funding must be BELOW this to count as building (default -100%)
   exhaustMaxFundingApr: number; // funding must be ABOVE this to count as exhaustion (default -20%)
+  exhaustMinOiDrop: number; // OI must have dropped this % for exhaustion to fire (0 = disabled)
   squeezeMinOiDrop: number;
   trendFilter: boolean;
   trendDays7Pct: number;
@@ -2355,6 +2363,7 @@ function parseArgs(): Args {
     squeezeHours: parseInt(g("--squeeze-hours", "6"), 10),
     squeezeMaxFundingApr: parseFloat(g("--squeeze-funding", "-10")),
     exhaustMaxFundingApr: parseFloat(g("--exhaust-funding", "-20")), // tighter than building threshold
+    exhaustMinOiDrop: parseFloat(g("--exhaust-oi-drop", "0")), // 0 = disabled by default
     squeezeMinOiDrop: parseFloat(g("--squeeze-oi-drop", "3")),
     trendFilter: !a.includes("--no-trend-filter"),
     trendDays7Pct: parseFloat(g("--trend-7d", "30")),
@@ -2504,6 +2513,11 @@ async function main(): Promise<void> {
   );
   console.log(
     `Exhaust: funding must normalise above ${cfg.exhaustMaxFundingApr}%APR (--exhaust-funding)`,
+    ...(cfg.exhaustMinOiDrop > 0
+      ? [
+          `Exhaust OI: OI must drop >=${cfg.exhaustMinOiDrop}% for exhaustion (--exhaust-oi-drop)`,
+        ]
+      : []),
   );
   console.log(
     `Trend:   ${cfg.trendFilter ? `filter ON — block shorts if +${cfg.trendDays7Pct}%/7d AND +${cfg.trendDays14Pct}%/14d` : "filter OFF"}`,

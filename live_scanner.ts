@@ -42,6 +42,10 @@ const EXCLUDE_COINS = new Set([
   "BTC", "ETH", "BNB", "BTCDOM",
 ]);
 
+// Sub-penny tokens have squeeze cycles longer than the 10h detection window
+// and produce unreliable exhaustion signals. Filter them out at discovery.
+const MIN_PRICE_USDC = 0.001;
+
 // Fallback if exchange info is unavailable
 const FALLBACK_COINS = [
   "HYPER", "HIVE", "KNC", "WIF", "BSB", "SPK", "ENJ", "ORDI", "DASH",
@@ -49,11 +53,21 @@ const FALLBACK_COINS = [
 
 async function fetchAllCoins(): Promise<string[]> {
   try {
-    const data = await fetchJSON(
-      `${BB_BASE}/v5/market/instruments-info?category=linear&status=Trading&limit=1000`
-    ) as { result?: { list?: { symbol: string; quoteCoin: string }[] } };
-    const coins = (data?.result?.list ?? [])
+    const [info, tickers] = await Promise.all([
+      fetchJSON(`${BB_BASE}/v5/market/instruments-info?category=linear&status=Trading&limit=1000`),
+      fetchJSON(`${BB_BASE}/v5/market/tickers?category=linear`),
+    ]) as [
+      { result?: { list?: { symbol: string; quoteCoin: string }[] } },
+      { result?: { list?: { symbol: string; lastPrice: string }[] } },
+    ];
+
+    const priceMap = new Map<string, number>();
+    for (const t of tickers?.result?.list ?? [])
+      priceMap.set(t.symbol, parseFloat(t.lastPrice));
+
+    const coins = (info?.result?.list ?? [])
       .filter(s => s.quoteCoin === "USDT")
+      .filter(s => (priceMap.get(s.symbol) ?? 0) >= MIN_PRICE_USDC)
       .map(s => s.symbol.replace("USDT", ""))
       .filter(c => !EXCLUDE_COINS.has(c))
       .sort();
@@ -90,6 +104,7 @@ const PARAMS = {
   squeezeMinOiDrop:       0,
   // Short squeeze — exhaustion phase
   exhaustMaxFundingApr:  -20,
+  exhaustMinOiDrop:        3,    // OI must drop ≥3% — blocks flat-OI false positives (NOT coin)
   // Trend filter
   trendDays7Pct:         30,
   trendDays14Pct:        50,
@@ -349,11 +364,15 @@ function detectShortSqueeze(
   const lowerHigh = candleWindow.length >= 3 &&
     c1.h < candleWindow[candleWindow.length - 3].h;
 
+  const exhaustOiOk = PARAMS.exhaustMinOiDrop <= 0 ||
+                      oiDropPct >= PARAMS.exhaustMinOiDrop;
+
   const isExhausting = cumulativePct >= PARAMS.squeezeMinPct * 0.8 &&
                        fundingApr    >  PARAMS.exhaustMaxFundingApr &&
                        fundingApr    <  5 &&
                        recentAvg     <  avgCandleMove * 0.5 &&
-                       lowerHigh;
+                       lowerHigh &&
+                       exhaustOiOk;
 
   if (isSqueeze)    return { triggered: true, phase: "BUILDING",   cumulativePct, oiDropPct, fundingApr };
   if (isExhausting) return { triggered: true, phase: "EXHAUSTION", cumulativePct, oiDropPct, fundingApr };
