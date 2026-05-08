@@ -570,4 +570,97 @@ async function managePositions(
   }
 }
 
-// Stage 9 will add: status command and the main loop.
+// ─── Status command ──────────────────────────────────────────────────────────
+async function printStatus(
+  positions:  PositionStore,
+  markPrices: Map<string, number>,
+): Promise<void> {
+  console.log(`\nAltShortBot Executor — ${IS_PAPER ? "[PAPER MODE]" : "[LIVE]"}`);
+  console.log(`Open positions: ${Object.keys(positions).length}`);
+
+  for (const [coin, pos] of Object.entries(positions)) {
+    const markPx = markPrices.get(coin) ?? pos.entryPx;
+    const pnlPct = (pos.entryPx - markPx) / pos.entryPx * 100;
+    const hrs    = ((Date.now() - pos.openedAt) / 3_600_000).toFixed(1);
+    console.log(
+      `  ${coin.padEnd(10)} entry: $${pos.entryPx.toFixed(4)}` +
+      `  mark: $${markPx.toFixed(4)}` +
+      `  PnL: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}%` +
+      `  held: ${hrs}h  stop: $${pos.stopLossPx.toFixed(4)}`
+    );
+  }
+
+  // Paper-mode P&L summary from the JSONL trade log.
+  if (IS_PAPER && existsSync(PAPER_LOG_FILE)) {
+    const trades: PaperTrade[] = readFileSync(PAPER_LOG_FILE, "utf8")
+      .trim().split("\n").filter(Boolean).map(l => JSON.parse(l));
+    if (trades.length) {
+      const totalPnl = trades.reduce((s, t) => s + t.pnlUsdc, 0);
+      const winRate  = trades.filter(t => t.pnlUsdc > 0).length / trades.length * 100;
+      console.log(
+        `\nPaper trades: ${trades.length}` +
+        `  Win rate: ${winRate.toFixed(0)}%` +
+        `  Total PnL: $${totalPnl.toFixed(2)}`
+      );
+    }
+  }
+}
+
+// ─── Main loop ───────────────────────────────────────────────────────────────
+async function main(): Promise<void> {
+  console.log(`\nAltShortBot Executor — ${new Date().toISOString()} — ${IS_PAPER ? "PAPER" : "LIVE"}`);
+
+  const positions  = loadPositions();
+  const markPrices = await fetchMarkPrices();
+
+  if (IS_STATUS) {
+    await printStatus(positions, markPrices);
+    return;
+  }
+
+  const assetIndex = await fetchAssetIndex();
+
+  // 1. Manage existing positions first (reconcile + breakeven/trailing/timeout).
+  await managePositions(positions, assetIndex, markPrices);
+
+  // 2. Process new signals from queue.
+  const queue = loadQueue();
+  if (queue.length > 0) {
+    // Fetch account value BEFORE clearing queue. If this fails in live mode,
+    // preserve the queue so signals retry on the next 5-minute run.
+    let accountValue = 0;
+    if (!IS_PAPER) {
+      try {
+        const state = await fetchAccountState();
+        accountValue = parseFloat(state.marginSummary.accountValue) || 0;
+      } catch (err) {
+        console.error(`fetchAccountState failed: ${(err as Error).message}`);
+        console.error(`Signals NOT processed this run — queue preserved for retry`);
+        savePositions(positions);
+        return;  // exit WITHOUT clearing queue
+      }
+    } else {
+      // Paper mode: configured account size, default $10k.
+      accountValue = parseFloat(process.env.HL_PAPER_ACCOUNT ?? "") || 10_000;
+    }
+
+    clearQueue();  // clear ONLY after successful account fetch
+    console.log(`Processing ${queue.length} queued signal(s)...`);
+
+    for (const signal of queue) {
+      // Skip stale signals (>2h old — price has likely moved too far).
+      const ageH = (Date.now() - signal.queuedAt) / 3_600_000;
+      if (ageH > 2) {
+        console.log(`${signal.coin}: signal stale (${ageH.toFixed(1)}h old) — skip`);
+        continue;
+      }
+      await executeSignal(signal, assetIndex, markPrices, positions, accountValue);
+      await new Promise(r => setTimeout(r, 200));  // rate-limit buffer between orders
+    }
+  }
+
+  savePositions(positions);
+  console.log(`Done. Open positions: ${Object.keys(positions).length}`);
+}
+
+main().catch(e => { console.error(e); process.exit(1); });
