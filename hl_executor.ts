@@ -101,6 +101,65 @@ async function sendTelegram(message: string): Promise<void> {
   }
 }
 
-// Stages 4-9 will add: HL data fetching, order execution, position sizing,
-// signal execution, position management, status command, and the main loop.
-// Until then the constants and helpers above are intentionally unused.
+// ─── Hyperliquid data fetching (read-only /info endpoint, no auth) ───────────
+async function hlPost(body: object): Promise<unknown> {
+  const res = await fetch(`${API_URL}/info`, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`HL API ${res.status}`);
+  return res.json();
+}
+
+interface AssetMeta {
+  name:        string;
+  szDecimals:  number;
+  maxLeverage: number;
+  isDelisted?: boolean;
+}
+
+async function fetchAssetIndex(): Promise<Map<string, { idx: number; szDecimals: number }>> {
+  const { universe } = await hlPost({ type: "meta" }) as { universe: AssetMeta[] };
+  const map = new Map<string, { idx: number; szDecimals: number }>();
+  universe.forEach((a, idx) => {
+    if (!a.isDelisted) map.set(a.name, { idx, szDecimals: a.szDecimals });
+  });
+  return map;
+}
+
+interface HLPosition {
+  position: {
+    coin:          string;
+    szi:           string;   // negative = short
+    entryPx:       string;
+    liquidationPx: string;
+    unrealizedPnl: string;
+    marginUsed:    string;
+  };
+}
+
+interface AccountState {
+  assetPositions: HLPosition[];
+  marginSummary:  { accountValue: string; totalMarginUsed: string };
+  withdrawable:   string;
+}
+
+async function fetchAccountState(): Promise<AccountState> {
+  if (!WALLET_ADDRESS) throw new Error("HL_WALLET_ADDRESS not set");
+  return await hlPost({ type: "clearinghouseState", user: WALLET_ADDRESS }) as AccountState;
+}
+
+async function fetchMarkPrices(): Promise<Map<string, number>> {
+  const [meta, ctxs] = await hlPost({ type: "metaAndAssetCtxs" }) as [
+    { universe: { name: string }[] },
+    { markPx: string }[],
+  ];
+  const map = new Map<string, number>();
+  meta.universe.forEach((a, i) => map.set(a.name, parseFloat(ctxs[i]?.markPx ?? "0")));
+  return map;
+}
+
+// Stages 5-9 will add: order execution, position sizing, signal execution,
+// position management, status command, and the main loop. Until then the
+// constants, state helpers, and HL fetchers above are intentionally unused.
