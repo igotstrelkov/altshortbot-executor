@@ -669,8 +669,13 @@ async function main(): Promise<void> {
   // Send alerts then save state.
   // State saves regardless of individual Telegram send success.
   for (const alert of allAlerts) {
-    await sendTelegram(formatAlert(alert));
-    await sleep(500); // Telegram rate limit
+    // FUNDING is purely informational — broad-market regimes can produce
+    // hundreds per scan, drowning the chat. It never affects positions
+    // (queue filter below excludes it). Still appears in PM2 logs for review.
+    if (alert.type !== "FUNDING") {
+      await sendTelegram(formatAlert(alert));
+      await sleep(500); // Telegram rate limit
+    }
 
     // Queue HIGH/MEDIUM EXHAUSTION & TREND_BREAK for the executor.
     // LOW confidence stays Telegram-only — too risky for auto-execution.
