@@ -104,6 +104,15 @@ async function sendTelegram(message: string): Promise<void> {
   }
 }
 
+// Operational alert helper. Logs to PM2 stderr AND sends a Telegram so the
+// user doesn't need to tail logs to know something broke. sendTelegram swallows
+// its own errors, so this never throws — safe to call from any catch block.
+async function alertError(context: string, err: unknown): Promise<void> {
+  const msg = err instanceof Error ? err.message : String(err);
+  console.error(`[${context}] ${msg}`);
+  await sendTelegram(`🚨 *altshortbot* — ${context}\n\`${msg}\``);
+}
+
 // ─── Hyperliquid data fetching (read-only /info endpoint, no auth) ───────────
 async function hlPost(body: object): Promise<unknown> {
   const res = await fetch(`${API_URL}/info`, {
@@ -241,10 +250,10 @@ async function openShort(
       return status.filled.oid;
     }
     if (typeof status === "object" && "resting" in status) return status.resting.oid;
-    console.error(`Order status: ${JSON.stringify(status)}`);
+    await alertError(`openShort ${coin}: unexpected status`, JSON.stringify(status));
     return null;
   } catch (err) {
-    console.error(`openShort failed: ${(err as Error).message}`);
+    await alertError(`openShort ${coin}`, err);
     return null;
   }
 }
@@ -281,10 +290,10 @@ async function placeStopLoss(
     });
     const status = result.response.data.statuses[0];
     if (typeof status === "object" && "resting" in status) return status.resting.oid;
-    console.error(`Stop-loss status: ${JSON.stringify(status)}`);
+    await alertError(`placeStopLoss: unexpected status`, JSON.stringify(status));
     return null;
   } catch (err) {
-    console.error(`placeStopLoss failed: ${(err as Error).message}`);
+    await alertError(`placeStopLoss`, err);
     return null;
   }
 }
@@ -295,7 +304,7 @@ async function cancelOrder(assetIdx: number, oid: number): Promise<void> {
   try {
     await client.cancel({ cancels: [{ a: assetIdx, o: oid }] });
   } catch (err) {
-    console.error(`cancelOrder failed: ${(err as Error).message}`);
+    await alertError(`cancelOrder oid=${oid}`, err);
   }
 }
 
@@ -304,6 +313,7 @@ async function closePosition(
   szDecimals: number,
   sizeCoin:   number,
   markPx:     number,
+  coin:       string,        // for alerting on failure
 ): Promise<void> {
   if (IS_PAPER) return;
 
@@ -324,7 +334,13 @@ async function closePosition(
       grouping: "na",
     });
   } catch (err) {
-    console.error(`closePosition failed: ${(err as Error).message}`);
+    // Position may still be open on exchange — local state will be cleaned up
+    // by reconciliation if the close eventually goes through. If not, manual
+    // intervention required.
+    await alertError(
+      `closePosition ${coin} — verify on app.hyperliquid.xyz`,
+      err,
+    );
   }
 }
 
@@ -406,7 +422,7 @@ async function executeSignal(
     stopOid = await placeStopLoss(asset.idx, asset.szDecimals, size, stopLossPx) ?? undefined;
     if (stopOid === undefined) {
       // Stop-loss failed — close immediately to avoid an unprotected short.
-      await closePosition(asset.idx, asset.szDecimals, size, markPx);
+      await closePosition(asset.idx, asset.szDecimals, size, markPx, coin);
       await sendTelegram(`⚠️ *${coin}* — stop-loss placement failed. Position closed for safety.`);
       return;
     }
@@ -478,8 +494,9 @@ async function managePositions(
         }
       }
     } catch (err) {
-      console.error(`Reconciliation failed: ${(err as Error).message}`);
       // Non-fatal — continue managing with stale state. Next run retries.
+      // Alert so the user knows local-vs-exchange state may be drifting.
+      await alertError("reconciliation", err);
     }
   }
 
@@ -533,7 +550,7 @@ async function managePositions(
     if (closeReason) {
       if (!IS_PAPER) {
         if (pos.stopOid) await cancelOrder(asset.idx, pos.stopOid);
-        await closePosition(asset.idx, asset.szDecimals, pos.sizeCoin, markPx);
+        await closePosition(asset.idx, asset.szDecimals, pos.sizeCoin, markPx, coin);
       }
 
       const pnlUsdc = (pos.entryPx - markPx) * pos.sizeCoin;
@@ -627,8 +644,10 @@ async function main(): Promise<void> {
         const state = await fetchAccountState();
         accountValue = parseFloat(state.marginSummary.accountValue) || 0;
       } catch (err) {
-        console.error(`fetchAccountState failed: ${(err as Error).message}`);
-        console.error(`Signals NOT processed this run — queue preserved for retry`);
+        await alertError(
+          "fetchAccountState — signals deferred, queue preserved for next run",
+          err,
+        );
         savePositions(positions);
         return;  // exit WITHOUT clearing queue
       }
@@ -656,4 +675,7 @@ async function main(): Promise<void> {
   console.log(`Done. Open positions: ${Object.keys(positions).length}`);
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+main().catch(async e => {
+  await alertError("executor crashed", e);
+  process.exit(1);
+});

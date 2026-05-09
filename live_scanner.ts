@@ -705,7 +705,13 @@ async function watchMode(): Promise<void> {
 // scanCoin without triggering a full live scan).
 const __filename = fileURLToPath(import.meta.url);
 if (process.argv[1] === __filename) {
-  process.argv.includes("--watch") ? watchMode() : main();
+  const onCrash = async (e: unknown) => {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`scanner crashed: ${msg}`);
+    await sendTelegram(`🚨 *altshortbot* — scanner crashed\n\`${msg}\``);
+    process.exit(1);
+  };
+  (process.argv.includes("--watch") ? watchMode() : main()).catch(onCrash);
 }
 
 export { scanCoin, defaultState, buildFundingByHour };
