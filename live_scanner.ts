@@ -28,7 +28,8 @@ import type { Alert, QueuedSignal } from "./shared_types.ts";
  * Scan specific coins:
  *   npx tsx live_scanner.ts --coins ORDI,KNC,HIVE
  *
- * Dry run (no Telegram — print to terminal):
+ * Dry run (Telegram fires normally if creds set; queue is NOT written so the
+ * executor cannot pick up signals from this scan):
  *   npx tsx live_scanner.ts --dry-run
  */
 
@@ -589,8 +590,8 @@ function formatAlert(alert: Alert): string {
 }
 
 async function sendTelegram(message: string): Promise<void> {
-  if (DRY_RUN || !TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
-    console.log("\n[DRY RUN]\n" + message + "\n");
+  if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
+    console.log("\n[no telegram creds]\n" + message + "\n");
     return;
   }
   try {
@@ -673,7 +674,10 @@ async function main(): Promise<void> {
 
     // Queue HIGH/MEDIUM EXHAUSTION & TREND_BREAK for the executor.
     // LOW confidence stays Telegram-only — too risky for auto-execution.
+    // DRY_RUN suppresses queue writes so a hand-triggered scan can't bleed into
+    // the executor's pickup. Telegram still fires (above) for observability.
     if (
+      !DRY_RUN &&
       (alert.type === "EXHAUSTION" || alert.type === "TREND_BREAK") &&
       (alert.confidence === "HIGH" || alert.confidence === "MEDIUM")
     ) {
