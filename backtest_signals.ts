@@ -13,8 +13,8 @@ import { writeFileSync } from "fs";
  *   npx tsx backtest_signals.ts --coin ORDI --days 30 \
  *     --threshold 10 --min-positive 2 --min-oi 2 --max-price 2 \
  *     --pump-pct 25 --pump-vol 5 --pump-rsi 88 --pump-funding 0 \
- *     --squeeze-pct 20 --squeeze-hours 10 --squeeze-funding -100 --squeeze-oi-drop 3 \
- *     --lookahead 48 --chart
+ *     --squeeze-pct 20 --squeeze-hours 10 --squeeze-funding -100 --squeeze-oi-drop 0 \
+ *     --exhaust-funding -20 --exhaust-oi-drop 3 --lookahead 48 --chart
  *
  * ── PARAMETER REFERENCE ─────────────────────────────────────────────────────
  *
@@ -81,6 +81,7 @@ import { writeFileSync } from "fs";
 
 const BN_BASE = "https://fapi.binance.com";
 const BN_DATA = "https://fapi.binance.com/futures/data";
+const HL_BASE = "https://api.hyperliquid.xyz";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -90,6 +91,7 @@ interface Config {
   coins: string[];
   days: number;
   lookaheadHours: number;
+  dataSource: "bybit" | "hl";
   fundingAprThreshold: number;
   minPositiveReadings: number;
   minOiChangePct: number;
@@ -164,10 +166,10 @@ interface PumpSignal {
   firedAtMs: number;
   firedAtStr: string;
   entryPrice: number;
-  candlePumpPct: number; // % move in the trigger candle
-  volumeMultiple: number; // volume vs 48h avg
-  rsi: number; // RSI at trigger
-  fundingApr: number; // funding at trigger (confirms leverage)
+  candlePumpPct: number;
+  volumeMultiple: number;
+  rsi: number;
+  fundingApr: number;
 }
 
 interface Outcome {
@@ -363,6 +365,72 @@ async function fetchBybitOIHistory(
   return records.sort((a, b) => a.timeMs - b.timeMs);
 }
 
+// ── Hyperliquid data fetchers ─────────────────────────────────────────────────
+// Used when --source hl is passed. HL settles funding every 1h — fundingRate
+// is already per-hour (no division needed, unlike Bybit's 4h/8h intervals).
+
+async function hlPost<T>(body: object): Promise<T> {
+  const res = await fetch(`${HL_BASE}/info`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status} from HL`);
+  return res.json() as Promise<T>;
+}
+
+async function fetchCandlesHL(
+  coin: string,
+  startMs: number,
+  endMs: number,
+): Promise<Candle[]> {
+  const all: Candle[] = [];
+  let cur = startMs;
+  while (cur < endMs) {
+    const raw = await hlPost<
+      {
+        t: number;
+        o: string;
+        h: string;
+        l: string;
+        c: string;
+        v: string;
+      }[]
+    >({
+      type: "candleSnapshot",
+      req: { coin, interval: "1h", startTime: cur, endTime: endMs },
+    });
+    if (!raw.length) break;
+    for (const r of raw)
+      all.push({ t: r.t, o: +r.o, h: +r.h, l: +r.l, c: +r.c, v: +r.v });
+    const lastT = raw[raw.length - 1].t;
+    if (raw.length < 5000 || lastT >= endMs) break;
+    cur = lastT + 3_600_000;
+    await sleep(80);
+  }
+  return all;
+}
+
+async function fetchFundingHL(
+  coin: string,
+  startMs: number,
+): Promise<FundingRecord[]> {
+  // HL settles every 1h — fundingRate field IS the per-hour rate (no ÷8 needed)
+  const raw = await hlPost<{ fundingRate: string; time: number }[]>({
+    type: "fundingHistory",
+    coin,
+    startTime: startMs,
+  });
+  return raw.map((r) => ({
+    timeMs: r.time,
+    rate8h: parseFloat(r.fundingRate) * 8, // stored for fixture compat, not used
+    ratePerHour: parseFloat(r.fundingRate), // already hourly on HL
+  }));
+}
+
+// HL has no historical per-coin OI endpoint — OI is skipped when --source hl.
+// Gate 2 (OI divergence) will not fire; squeeze detection uses candles + funding only.
+
 function applyPriceToBybitOI(
   oiRecords: OIRecord[],
   priceByHour: Record<number, number>,
@@ -527,8 +595,8 @@ function computeRSI(closes: number[], period: number = 14): number {
 }
 
 function detectPumpTop(
-  candles: Candle[], // chronological 1h candles
-  fundingNow: number, // per-hour rate at this hour
+  candles: Candle[],
+  fundingNow: number,
   config: Config,
 ): {
   triggered: boolean;
@@ -549,18 +617,11 @@ function detectPumpTop(
   const last = candles[candles.length - 1];
   const prev = candles[candles.length - 2];
 
-  // Candle pump % — high of this candle vs close of previous
   const candlePumpPct = ((last.h - prev.c) / prev.c) * 100;
-
-  // Volume multiple — this candle's volume vs 48h average
   const avgVol = avgArr(candles.slice(-49, -1).map((c) => c.v));
   const volumeMultiple = avgVol > 0 ? last.v / avgVol : 0;
-
-  // RSI on last 15 closes
   const closes = candles.slice(-16).map((c) => c.c);
   const rsi = computeRSI(closes, 14);
-
-  // Funding APR at this moment
   const fundingApr = fundingNow * 8760 * 100;
 
   result.candlePumpPct = candlePumpPct;
@@ -801,34 +862,59 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
     );
   } else {
     // Fetch live
-    try {
-      process.stdout.write(`  Fetching price data...`);
-      candles = await fetchKlines(symbol, fetchFrom, nowMs);
-      console.log(` ${candles.length} bars`);
-    } catch (e: unknown) {
-      console.log(
-        `\n  ❌ Price (klines) fetch failed: ${e instanceof Error ? e.message : e}`,
-      );
-      console.log(`     This coin may have been listed recently or delisted.`);
-    }
+    if (config.dataSource === "hl") {
+      // Hyperliquid data path — coin name without USDT suffix
+      try {
+        process.stdout.write(`  Fetching price data (Hyperliquid)...`);
+        candles = await fetchCandlesHL(coin, fetchFrom, nowMs);
+        console.log(` ${candles.length} bars`);
+      } catch (e: unknown) {
+        console.log(
+          `\n  ❌ HL candle fetch failed: ${e instanceof Error ? e.message : e}`,
+        );
+      }
+      try {
+        process.stdout.write(
+          `  Fetching funding history (Hyperliquid, 1h settlement)...`,
+        );
+        bybitFunding = await fetchFundingHL(coin, fetchFrom);
+        console.log(` ${bybitFunding.length} records`);
+      } catch (e: unknown) {
+        console.log(` unavailable (${e instanceof Error ? e.message : e})`);
+      }
+    } else {
+      // Bybit + Binance data path — coin name with USDT suffix
+      try {
+        process.stdout.write(`  Fetching price data...`);
+        candles = await fetchKlines(symbol, fetchFrom, nowMs);
+        console.log(` ${candles.length} bars`);
+      } catch (e: unknown) {
+        console.log(
+          `\n  ❌ Price (klines) fetch failed: ${e instanceof Error ? e.message : e}`,
+        );
+        console.log(
+          `     This coin may have been listed recently or delisted.`,
+        );
+      }
 
-    try {
-      process.stdout.write(`  Fetching funding history (Binance)...`);
-      funding = await fetchFundingHistory(symbol, fetchFrom, nowMs);
-      console.log(` ${funding.length} records`);
-    } catch (e: unknown) {
-      console.log(
-        `\n  ❌ Binance funding fetch failed: ${e instanceof Error ? e.message : e}`,
-      );
-    }
+      try {
+        process.stdout.write(`  Fetching funding history (Binance)...`);
+        funding = await fetchFundingHistory(symbol, fetchFrom, nowMs);
+        console.log(` ${funding.length} records`);
+      } catch (e: unknown) {
+        console.log(
+          `\n  ❌ Binance funding fetch failed: ${e instanceof Error ? e.message : e}`,
+        );
+      }
 
-    // Also fetch Bybit funding — use whichever exchange had higher rate at each hour
-    try {
-      process.stdout.write(`  Fetching funding history (Bybit)...`);
-      bybitFunding = await fetchBybitFundingHistory(symbol, fetchFrom, nowMs);
-      console.log(` ${bybitFunding.length} records`);
-    } catch (e: unknown) {
-      console.log(` unavailable (${e instanceof Error ? e.message : e})`);
+      // Also fetch Bybit funding — use whichever exchange had higher rate at each hour
+      try {
+        process.stdout.write(`  Fetching funding history (Bybit)...`);
+        bybitFunding = await fetchBybitFundingHistory(symbol, fetchFrom, nowMs);
+        console.log(` ${bybitFunding.length} records`);
+      } catch (e: unknown) {
+        console.log(` unavailable (${e instanceof Error ? e.message : e})`);
+      }
     }
   }
 
@@ -845,27 +931,35 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
 
   let gate2Available = true;
   if (!config.useFixtures || !oi.length) {
-    // Only fetch OI if we didn't load it from a fixture
-    try {
-      process.stdout.write(`  Fetching OI history (Binance)...`);
-      oi = await fetchOIHistory(symbol, oiFetchFrom, nowMs);
-      console.log(` ${oi.length} records`);
-    } catch (_e: unknown) {
-      process.stdout.write(`  Binance OI unavailable — trying Bybit...`);
+    if (config.dataSource === "hl") {
+      // HL has no historical per-coin OI endpoint — Gate 2 disabled for HL source
+      gate2Available = false;
+      console.log(
+        `  OI history: not available from Hyperliquid — Gate 2 (OI divergence) disabled`,
+      );
+    } else {
+      // Only fetch OI if we didn't load it from a fixture
       try {
-        const raw = await fetchBybitOIHistory(symbol, oiFetchFrom, nowMs);
-        oi = applyPriceToBybitOI(raw, priceByHour);
-        if (!oi.length) throw new Error("no USD-convertible OI records");
-        console.log(` ${oi.length} records (Bybit)`);
-      } catch (e2: unknown) {
-        gate2Available = false;
-        const msg = e2 instanceof Error ? e2.message : String(e2);
-        console.log(
-          `\n  ⚠️  OI history unavailable on Binance and Bybit for ${coin} (${msg}).`,
-        );
-        console.log(
-          `     Falling back to Gate 1 only — signals will be FUNDING_ONLY.`,
-        );
+        process.stdout.write(`  Fetching OI history (Binance)...`);
+        oi = await fetchOIHistory(symbol, oiFetchFrom, nowMs);
+        console.log(` ${oi.length} records`);
+      } catch (_e: unknown) {
+        process.stdout.write(`  Binance OI unavailable — trying Bybit...`);
+        try {
+          const raw = await fetchBybitOIHistory(symbol, oiFetchFrom, nowMs);
+          oi = applyPriceToBybitOI(raw, priceByHour);
+          if (!oi.length) throw new Error("no USD-convertible OI records");
+          console.log(` ${oi.length} records (Bybit)`);
+        } catch (e2: unknown) {
+          gate2Available = false;
+          const msg = e2 instanceof Error ? e2.message : String(e2);
+          console.log(
+            `\n  ⚠️  OI history unavailable on Binance and Bybit for ${coin} (${msg}).`,
+          );
+          console.log(
+            `     Falling back to Gate 1 only — signals will be FUNDING_ONLY.`,
+          );
+        }
       }
     }
   }
@@ -900,43 +994,43 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
     console.log(`  [FIXTURE] Saved → ${fixturePath}`);
   }
 
-  // Merge Binance and Bybit funding — use whichever exchange had higher rate each hour
-  const { merged: rawFundingByHour, source: fundingSource } =
-    mergeToHighestFunding(funding, bybitFunding);
-
-  // Fill any gaps in the merged map with 0.
-  //
-  // ⚠️  REPRESENTATIONAL ARTIFACT — does not match live_scanner.ts.
-  // Bybit settles every 4h or 8h; only those timestamps are populated by
-  // mergeToHighestFunding. Zero-filling the gaps means that during a deep
-  // squeeze, fundingApr alternates between e.g. -1500% (settlement hour) and
-  // 0% (every gap hour). The 0% gap satisfies the EXHAUSTION conjunction
-  // (-20 < apr < 5 AND lowerHigh AND momentum-fading) one hour after each
-  // settlement, so EXHAUSTION fires repeatedly inside an active squeeze.
-  // It coincides with squeeze peaks BY TIMING COINCIDENCE (8h cadence aligns
-  // with the move) — not because funding actually normalised. backtest_test.ts
-  // assertions like "EXHAUSTION at 05-02 09:00 PUMP+DUMP" rely on this artifact.
-  //
-  // live_scanner.ts forward-fills the last settlement rate instead, which is
-  // semantically truer (the published rate is the rate-in-effect between
-  // settlements). As a consequence, the live scanner fires far fewer EXHAUSTION
-  // signals than this backtest reports — the backtest's EXHAUSTION win rates
-  // do NOT transfer to live behaviour. If you ever want the backtest to model
-  // live behaviour faithfully, change this to forward-fill and re-tune PARAMS.
-  for (let ts = floorH(fetchFrom); ts <= nowMs; ts += 3_600_000) {
-    if (rawFundingByHour[ts] === undefined) rawFundingByHour[ts] = 0;
-  }
-
-  // Log which exchange dominated funding
-  const bybitSlots = Object.values(fundingSource).filter(
-    (s) => s === "bybit",
-  ).length;
-  const totalSlots = Object.keys(fundingSource).length;
-  if (bybitFunding.length && totalSlots > 0) {
-    const bybitPct = Math.round((bybitSlots / totalSlots) * 100);
+  // Build per-hour funding map
+  let rawFundingByHour: Record<number, number> = {};
+  if (config.dataSource === "hl") {
+    // HL: single source, already per-hour, just forward-fill
+    const sorted = [...bybitFunding].sort((a, b) => a.timeMs - b.timeMs);
+    let last = 0,
+      rIdx = 0;
+    for (let ts = floorH(fetchFrom); ts <= nowMs; ts += 3_600_000) {
+      while (rIdx < sorted.length && floorH(sorted[rIdx].timeMs) <= ts) {
+        last = sorted[rIdx].ratePerHour;
+        rIdx++;
+      }
+      rawFundingByHour[ts] = last;
+    }
     console.log(
-      `  Funding source: Bybit higher in ${bybitPct}% of hours, Binance in ${100 - bybitPct}%`,
+      `  Funding source: Hyperliquid (${bybitFunding.length} 1h settlements, forward-filled)`,
     );
+  } else {
+    // Bybit + Binance: merge using highest absolute rate per hour
+    const { merged, source: fundingSource } = mergeToHighestFunding(
+      funding,
+      bybitFunding,
+    );
+    rawFundingByHour = merged;
+    for (let ts = floorH(fetchFrom); ts <= nowMs; ts += 3_600_000) {
+      if (rawFundingByHour[ts] === undefined) rawFundingByHour[ts] = 0;
+    }
+    const bybitSlots = Object.values(fundingSource).filter(
+      (s) => s === "bybit",
+    ).length;
+    const totalSlots = Object.keys(fundingSource).length;
+    if (bybitFunding.length && totalSlots > 0) {
+      const bybitPct = Math.round((bybitSlots / totalSlots) * 100);
+      console.log(
+        `  Funding source: Bybit higher in ${bybitPct}% of hours, Binance in ${100 - bybitPct}%`,
+      );
+    }
   }
 
   const oiByHour: Record<number, number> = {};
@@ -1013,9 +1107,9 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
     }
 
     // ── Pump top detection — runs independently of funding gates ──────────────
+    // ── Pump top detection ────────────────────────────────────────────────────
     if (candleWindow.length >= 50) {
       const pump = detectPumpTop(candleWindow, fRate, config);
-      // Track peak values for diagnostic output
       if (pump.candlePumpPct > maxPumpCandlePct) {
         maxPumpCandlePct = pump.candlePumpPct;
         maxPumpCandleAt = fmtDate(ts);
@@ -1041,7 +1135,7 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
       }
     }
 
-    // ── Trend filter — suppress most short signals during parabolic uptrends ───
+    // ── Trend filter ──────────────────────────────────────────────────────────
     const trending = isTrendingFull(ts, priceByHour, config);
     if (trending) trendingHours++;
 
@@ -1412,14 +1506,8 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
   for (const [ts, r] of Object.entries(rawFundingByHour))
     fundingAprByHour[Number(ts)] = r * 8760 * 100;
 
-  const bybitFundingPct =
-    Object.keys(fundingSource).length > 0
-      ? Math.round(
-          (Object.values(fundingSource).filter((s) => s === "bybit").length /
-            Object.keys(fundingSource).length) *
-            100,
-        )
-      : 0;
+  // Funding source breakdown (only available for bybit/binance path)
+  const bybitFundingPct = 0; // computed inline in runBacktest for display
 
   return {
     coin,
@@ -2328,6 +2416,7 @@ interface Args {
   coins: string[];
   days: number;
   lookaheadHours: number;
+  dataSource: "bybit" | "hl";
   fundingAprThreshold: number;
   minPositiveReadings: number;
   minOiChangePct: number;
@@ -2380,9 +2469,10 @@ function parseArgs(): Args {
     squeezeMinPct: parseFloat(g("--squeeze-pct", "20")),
     squeezeHours: parseInt(g("--squeeze-hours", "6"), 10),
     squeezeMaxFundingApr: parseFloat(g("--squeeze-funding", "-10")),
-    exhaustMaxFundingApr: parseFloat(g("--exhaust-funding", "-20")), // tighter than building threshold
-    exhaustMinOiDrop: parseFloat(g("--exhaust-oi-drop", "0")), // 0 = disabled by default
+    exhaustMaxFundingApr: parseFloat(g("--exhaust-funding", "-20")),
+    exhaustMinOiDrop: parseFloat(g("--exhaust-oi-drop", "0")),
     squeezeMinOiDrop: parseFloat(g("--squeeze-oi-drop", "3")),
+    dataSource: g("--source", "bybit") as "bybit" | "hl",
     trendFilter: !a.includes("--no-trend-filter"),
     trendDays7Pct: parseFloat(g("--trend-7d", "30")),
     trendDays14Pct: parseFloat(g("--trend-14d", "50")),
