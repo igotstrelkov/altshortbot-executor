@@ -75,7 +75,7 @@ const SEED_SIGNALS: BuildingSignal[] = [
   {
     coin: "WAL",
     firedAt: "2026-05-10T15:12:00Z",
-    firedAtMs: 1746889920000,
+    firedAtMs: new Date("2026-05-10T15:12:00Z").getTime(),
     entry: 0.0845,
     fundingApr: -741.5,
     squeeze: 20.2,
