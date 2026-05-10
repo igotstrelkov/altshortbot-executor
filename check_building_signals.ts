@@ -72,6 +72,14 @@ const SEED_SIGNALS: BuildingSignal[] = [
     fundingApr: -224.2,
     squeeze: 36.7,
   },
+  {
+    coin: "WAL",
+    firedAt: "2026-05-10T15:12:00Z",
+    firedAtMs: 1746889920000,
+    entry: 0.0845,
+    fundingApr: -741.5,
+    squeeze: 20.2,
+  },
 ];
 
 // ── Persistence helpers ───────────────────────────────────────────────────────
