@@ -12,8 +12,8 @@
  *   npx tsx scanner_test.ts KNC      ← single coin
  */
 
-import { readFileSync, existsSync } from "fs";
-import { scanCoin, defaultState, buildFundingByHour } from "./live_scanner.ts";
+import { existsSync, readFileSync } from "fs";
+import { buildFundingByHour, defaultState, scanCoin } from "./live_scanner.ts";
 import type { Alert } from "./shared_types.ts";
 
 const FIXTURE_DIR = "fixtures";
@@ -67,7 +67,7 @@ const TESTS: ScannerTestCase[] = [
       minAlerts: 10,
       mustInclude: [
         { type: "BUILDING", confidence: "MEDIUM", approxHour: "2026-04-16" },
-        { type: "FUNDING",  confidence: "MEDIUM", approxHour: "2026-04-29" },
+        { type: "FUNDING", confidence: "MEDIUM", approxHour: "2026-04-29" },
       ],
     },
   },
@@ -115,7 +115,9 @@ async function runTest(tc: ScannerTestCase): Promise<string[]> {
   if (!existsSync(fixturePath)) return [`SKIP: no fixture for ${tc.coin}`];
 
   const fx = JSON.parse(readFileSync(fixturePath, "utf8")) as {
-    candles: any[]; fundingBybit: any[]; oi: any[];
+    candles: any[];
+    fundingBybit: any[];
+    oi: any[];
   };
 
   const fundingByHour = buildFundingByHour(fx.fundingBybit);
@@ -125,7 +127,8 @@ async function runTest(tc: ScannerTestCase): Promise<string[]> {
 
   for (let i = MIN_WINDOW; i < fx.candles.length; i++) {
     const { alerts, newState } = scanCoin(
-      tc.coin, state,
+      tc.coin,
+      state,
       fx.candles.slice(0, i + 1),
       fundingByHour,
       fx.oi.filter((r: any) => r.timeMs <= fx.candles[i].t).slice(-10),
@@ -135,37 +138,47 @@ async function runTest(tc: ScannerTestCase): Promise<string[]> {
   }
 
   if (tc.expect.minAlerts && allAlerts.length < tc.expect.minAlerts)
-    failures.push(`Expected >= ${tc.expect.minAlerts} alerts, got ${allAlerts.length}`);
+    failures.push(
+      `Expected >= ${tc.expect.minAlerts} alerts, got ${allAlerts.length}`,
+    );
 
   for (const expected of tc.expect.mustInclude ?? []) {
-    const match = allAlerts.find(a =>
-      a.type === expected.type &&
-      (!expected.confidence || a.confidence === expected.confidence) &&
-      (!expected.approxHour  || a.firedAtStr.startsWith(expected.approxHour))
+    const match = allAlerts.find(
+      (a) =>
+        a.type === expected.type &&
+        (!expected.confidence || a.confidence === expected.confidence) &&
+        (!expected.approxHour || a.firedAtStr.startsWith(expected.approxHour)),
     );
     if (!match)
-      failures.push(`Missing: ${expected.type} [${expected.confidence ?? "any"}] ~${expected.approxHour ?? "anytime"}`);
+      failures.push(
+        `Missing: ${expected.type} [${expected.confidence ?? "any"}] ~${expected.approxHour ?? "anytime"}`,
+      );
   }
 
   if (tc.expect.stateAfter?.lastBuildingMinFunding?.lessThan !== undefined) {
     const threshold = tc.expect.stateAfter.lastBuildingMinFunding.lessThan;
     if (state.lastBuildingMinFunding >= threshold)
-      failures.push(`lastBuildingMinFunding ${state.lastBuildingMinFunding} should be < ${threshold}`);
+      failures.push(
+        `lastBuildingMinFunding ${state.lastBuildingMinFunding} should be < ${threshold}`,
+      );
   }
 
   return failures;
 }
 
 async function main() {
-  const args   = process.argv.slice(2);
-  const filter = args.find(a => !a.startsWith("--"));
-  const tests  = filter ? TESTS.filter(t => t.coin === filter.toUpperCase()) : TESTS;
+  const args = process.argv.slice(2);
+  const filter = args.find((a) => !a.startsWith("--"));
+  const tests = filter
+    ? TESTS.filter((t) => t.coin === filter.toUpperCase())
+    : TESTS;
 
   console.log("\nAltShortBot Scanner Regression Tests");
   console.log("══════════════════════════════════════");
   console.log(`Running ${tests.length} test(s)...\n`);
 
-  let passed = 0, failed = 0;
+  let passed = 0,
+    failed = 0;
   for (const tc of tests) {
     const failures = await runTest(tc);
     if (failures[0]?.startsWith("SKIP")) {
@@ -175,7 +188,7 @@ async function main() {
       passed++;
     } else {
       console.log(`  ${tc.coin.padEnd(8)} ❌`);
-      failures.forEach(f => console.log(`             ${f}`));
+      failures.forEach((f) => console.log(`             ${f}`));
       failed++;
     }
   }
@@ -185,4 +198,7 @@ async function main() {
   if (failed > 0) process.exit(1);
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

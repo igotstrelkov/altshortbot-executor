@@ -1,5 +1,6 @@
-import { writeFileSync, readFileSync, existsSync } from "fs";
+import { existsSync, readFileSync, writeFileSync } from "fs";
 import { fileURLToPath } from "url";
+import { logBuildingSignal } from "./check_building_signals.ts";
 import type { Alert, QueuedSignal } from "./shared_types.ts";
 
 /**
@@ -40,9 +41,7 @@ import type { Alert, QueuedSignal } from "./shared_types.ts";
 // New listings are picked up automatically; delisted coins drop off cleanly.
 
 // Skip these regardless (index tokens, large caps that almost never fire)
-const EXCLUDE_COINS = new Set([
-  "BTC", "ETH", "BNB", "BTCDOM",
-]);
+const EXCLUDE_COINS = new Set(["BTC", "ETH", "BNB", "BTCDOM"]);
 
 // Sub-penny tokens have squeeze cycles longer than the 10h detection window
 // and produce unreliable exhaustion signals. Filter them out at discovery.
@@ -50,15 +49,25 @@ const MIN_PRICE_USDC = 0.001;
 
 // Fallback if exchange info is unavailable
 const FALLBACK_COINS = [
-  "HYPER", "HIVE", "KNC", "WIF", "BSB", "SPK", "ENJ", "ORDI", "DASH",
+  "HYPER",
+  "HIVE",
+  "KNC",
+  "WIF",
+  "BSB",
+  "SPK",
+  "ENJ",
+  "ORDI",
+  "DASH",
 ];
 
 async function fetchAllCoins(): Promise<string[]> {
   try {
-    const [info, tickers] = await Promise.all([
-      fetchJSON(`${BB_BASE}/v5/market/instruments-info?category=linear&status=Trading&limit=1000`),
+    const [info, tickers] = (await Promise.all([
+      fetchJSON(
+        `${BB_BASE}/v5/market/instruments-info?category=linear&status=Trading&limit=1000`,
+      ),
       fetchJSON(`${BB_BASE}/v5/market/tickers?category=linear`),
-    ]) as [
+    ])) as [
       { result?: { list?: { symbol: string; quoteCoin: string }[] } },
       { result?: { list?: { symbol: string; lastPrice: string }[] } },
     ];
@@ -68,91 +77,110 @@ async function fetchAllCoins(): Promise<string[]> {
       priceMap.set(t.symbol, parseFloat(t.lastPrice));
 
     const coins = (info?.result?.list ?? [])
-      .filter(s => s.quoteCoin === "USDT")
-      .filter(s => (priceMap.get(s.symbol) ?? 0) >= MIN_PRICE_USDC)
-      .map(s => s.symbol.replace("USDT", ""))
-      .filter(c => !EXCLUDE_COINS.has(c))
+      .filter((s) => s.quoteCoin === "USDT")
+      .filter((s) => (priceMap.get(s.symbol) ?? 0) >= MIN_PRICE_USDC)
+      .map((s) => s.symbol.replace("USDT", ""))
+      .filter((c) => !EXCLUDE_COINS.has(c))
       .sort();
     if (coins.length) return coins;
-  } catch { /* fall through */ }
-  console.warn("  ⚠️  Could not fetch coin list — using fallback validated set");
+  } catch {
+    /* fall through */
+  }
+  console.warn(
+    "  ⚠️  Could not fetch coin list — using fallback validated set",
+  );
   return FALLBACK_COINS;
 }
 
 // ─── Module-level constants ───────────────────────────────────────────────────
-const HOUR                 = 3_600_000;
-const FUNDING_COOLDOWN_MS  = 8 * HOUR;   // Gate 1 re-fires once per settlement cycle
-const MIN_EXHAUSTION_GAP_H = 6;          // Exhaustion re-fire minimum gap (hours)
-const STATE_FILE           = "scanner_state.json";
-const BB_BASE              = "https://api.bybit.com";
+const HOUR = 3_600_000;
+const FUNDING_COOLDOWN_MS = 8 * HOUR; // Gate 1 re-fires once per settlement cycle
+const MIN_EXHAUSTION_GAP_H = 6; // Exhaustion re-fire minimum gap (hours)
+const STATE_FILE = "scanner_state.json";
+const BB_BASE = "https://api.bybit.com";
 
 // ─── Validated parameters (from backtesting across 10 coins) ─────────────────
 const PARAMS = {
   // Gate 1 — crowded longs
-  fundingAprThreshold:   10,
-  minPositiveReadings:    2,
+  fundingAprThreshold: 10,
+  minPositiveReadings: 2,
   // Gate 2 — OI divergence
-  minOiChangePct:         2,
-  maxPriceChangePct:      2,
+  minOiChangePct: 2,
+  maxPriceChangePct: 2,
   // Pump top
-  pumpMinPct:            25,
-  pumpMinVolMult:         5,
-  pumpMinRsi:            88,
-  pumpMinFundingApr:      0,
+  pumpMinPct: 25,
+  pumpMinVolMult: 5,
+  pumpMinRsi: 88,
+  pumpMinFundingApr: 0,
   // Short squeeze — building phase
-  squeezeMinPct:         20,
-  squeezeHours:          10,
+  squeezeMinPct: 20,
+  squeezeHours: 10,
   squeezeMaxFundingApr: -100,
-  squeezeMinOiDrop:       0,
+  squeezeMinOiDrop: 0,
   // Short squeeze — exhaustion phase
-  exhaustMaxFundingApr:  -20,
-  exhaustMinOiDrop:        3,    // OI must drop ≥3% — blocks flat-OI false positives (NOT coin)
+  exhaustMaxFundingApr: -20,
+  exhaustMinOiDrop: 3, // OI must drop ≥3% — blocks flat-OI false positives (NOT coin)
   // Trend filter
-  trendDays7Pct:         30,
-  trendDays14Pct:        50,
+  trendDays7Pct: 30,
+  trendDays14Pct: 50,
   trendBreakFundingApr: -500,
 } as const;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-interface Candle        { t: number; o: number; h: number; l: number; c: number; v: number; }
-interface FundingRecord { timeMs: number; ratePerHour: number; }
-interface OIRecord      { timeMs: number; oiUsd: number; }
+interface Candle {
+  t: number;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+}
+interface FundingRecord {
+  timeMs: number;
+  ratePerHour: number;
+}
+interface OIRecord {
+  timeMs: number;
+  oiUsd: number;
+}
 
 interface CoinState {
   // Wave tracking
-  squeezeWaveStartMs:     number | null;
-  squeezeWaveHighPrice:   number;
-  lastBuildingSignalMs:   number | null;
-  lastBuildingMinFunding: number;         // persists across wave resets — needed for TREND_BREAK
-  lastSqueezePhase:       "BUILDING" | "EXHAUSTION" | "TREND_BREAK" | null;
+  squeezeWaveStartMs: number | null;
+  squeezeWaveHighPrice: number;
+  lastBuildingSignalMs: number | null;
+  lastBuildingMinFunding: number; // persists across wave resets — needed for TREND_BREAK
+  lastSqueezePhase: "BUILDING" | "EXHAUSTION" | "TREND_BREAK" | null;
   // Per-wave fired flags
-  waveAlertedBuilding:    boolean;        // BUILDING fires once per wave
-  waveAlertedTrendBreak:  boolean;        // TREND_BREAK fires once per trending episode
+  waveAlertedBuilding: boolean; // BUILDING fires once per wave
+  waveAlertedTrendBreak: boolean; // TREND_BREAK fires once per trending episode
   // Exhaustion: timestamp-based (6h minimum gap) — allows re-fire after early bad signal
-  lastExhaustionMs:       number | null;
+  lastExhaustionMs: number | null;
   // Funding cooldown
-  lastFundingAlertMs:     number | null;
+  lastFundingAlertMs: number | null;
   // Trend tracking (detects uptrend exit to reset waveAlertedTrendBreak)
-  wasTrending:            boolean;
+  wasTrending: boolean;
 }
 
 // ─── Module-level helpers ─────────────────────────────────────────────────────
-const sleep  = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const floorH = (ms: number) => Math.floor(ms / HOUR) * HOUR;
-const avgArr = (arr: number[]) => arr.length
-  ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+const avgArr = (arr: number[]) =>
+  arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
 
 function fmtDate(ms: number): string {
   return new Date(ms).toISOString().slice(0, 16).replace("T", " ");
 }
 
 function getPriceHoursAgo(candles: Candle[], hoursAgo: number): number | null {
-  return candles.length > hoursAgo ? candles[candles.length - 1 - hoursAgo].c : null;
+  return candles.length > hoursAgo
+    ? candles[candles.length - 1 - hoursAgo].c
+    : null;
 }
 
 function getLast8HourlyFundingReadings(
   merged: Record<number, number>,
-  nowTs:  number,
+  nowTs: number,
 ): number[] {
   const readings: number[] = [];
   for (let i = 7; i >= 0; i--) {
@@ -164,23 +192,26 @@ function getLast8HourlyFundingReadings(
 // ─── State persistence ────────────────────────────────────────────────────────
 function defaultState(): CoinState {
   return {
-    squeezeWaveStartMs:     null,
-    squeezeWaveHighPrice:   0,
-    lastBuildingSignalMs:   null,
+    squeezeWaveStartMs: null,
+    squeezeWaveHighPrice: 0,
+    lastBuildingSignalMs: null,
     lastBuildingMinFunding: 0,
-    lastSqueezePhase:       null,
-    waveAlertedBuilding:    false,
-    waveAlertedTrendBreak:  false,
-    lastExhaustionMs:       null,
-    lastFundingAlertMs:     null,
-    wasTrending:            false,
+    lastSqueezePhase: null,
+    waveAlertedBuilding: false,
+    waveAlertedTrendBreak: false,
+    lastExhaustionMs: null,
+    lastFundingAlertMs: null,
+    wasTrending: false,
   };
 }
 
 function loadState(): Record<string, CoinState> {
   if (!existsSync(STATE_FILE)) return {};
-  try { return JSON.parse(readFileSync(STATE_FILE, "utf8")); }
-  catch { return {}; }
+  try {
+    return JSON.parse(readFileSync(STATE_FILE, "utf8"));
+  } catch {
+    return {};
+  }
 }
 
 function saveState(state: Record<string, CoinState>): void {
@@ -195,7 +226,9 @@ function appendToQueue(alert: Alert): void {
   try {
     if (existsSync(QUEUE_FILE))
       queue = JSON.parse(readFileSync(QUEUE_FILE, "utf8"));
-  } catch { queue = []; }
+  } catch {
+    queue = [];
+  }
 
   queue.push({ ...alert, queuedAt: Date.now() });
   writeFileSync(QUEUE_FILE, JSON.stringify(queue, null, 2), "utf8");
@@ -206,9 +239,12 @@ async function fetchJSON(url: string): Promise<unknown> {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const res = await fetch(url);
-      if (res.status === 429) { await sleep(2000 * (attempt + 1)); continue; }
+      if (res.status === 429) {
+        await sleep(2000 * (attempt + 1));
+        continue;
+      }
       if (res.status === 403) throw new Error("403 — coin may be delisted");
-      if (!res.ok)            throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return res.json();
     } catch (e) {
       if (attempt === 2) throw e;
@@ -220,11 +256,11 @@ async function fetchJSON(url: string): Promise<unknown> {
 
 // ─── Data fetching ────────────────────────────────────────────────────────────
 async function fetchCandles(coin: string, limit: number): Promise<Candle[]> {
-  const raw = await fetchJSON(
-    `${BB_BASE}/v5/market/kline?category=linear&symbol=${coin}USDT&interval=60&limit=${limit}`
-  ) as { result?: { list?: string[][] } };
+  const raw = (await fetchJSON(
+    `${BB_BASE}/v5/market/kline?category=linear&symbol=${coin}USDT&interval=60&limit=${limit}`,
+  )) as { result?: { list?: string[][] } };
   // Bybit returns newest-first — reverse to get chronological order
-  return (raw?.result?.list ?? []).reverse().map(r => ({
+  return (raw?.result?.list ?? []).reverse().map((r) => ({
     t: parseInt(r[0]),
     o: parseFloat(r[1]),
     h: parseFloat(r[2]),
@@ -238,42 +274,47 @@ async function fetchFundingBybit(coin: string): Promise<FundingRecord[]> {
   // Fetch actual settlement interval (varies: 4h or 8h per coin)
   let intervalHours = 8;
   try {
-    const info = await fetchJSON(
-      `${BB_BASE}/v5/market/instruments-info?category=linear&symbol=${coin}USDT`
-    ) as { result?: { list?: { fundingInterval?: number }[] } };
+    const info = (await fetchJSON(
+      `${BB_BASE}/v5/market/instruments-info?category=linear&symbol=${coin}USDT`,
+    )) as { result?: { list?: { fundingInterval?: number }[] } };
     const fi = info?.result?.list?.[0]?.fundingInterval;
     if (fi) intervalHours = fi / 60;
-  } catch { /* use default 8h */ }
+  } catch {
+    /* use default 8h */
+  }
 
-  const raw = await fetchJSON(
-    `${BB_BASE}/v5/market/funding/history?category=linear&symbol=${coin}USDT&limit=200`
-  ) as { result?: { list?: { fundingRateTimestamp: string; fundingRate: string }[] } };
+  const raw = (await fetchJSON(
+    `${BB_BASE}/v5/market/funding/history?category=linear&symbol=${coin}USDT&limit=200`,
+  )) as {
+    result?: { list?: { fundingRateTimestamp: string; fundingRate: string }[] };
+  };
 
   return (raw?.result?.list ?? [])
-    .map(r => ({
-      timeMs:      parseInt(r.fundingRateTimestamp),
+    .map((r) => ({
+      timeMs: parseInt(r.fundingRateTimestamp),
       ratePerHour: parseFloat(r.fundingRate) / intervalHours,
     }))
     .reverse();
 }
 
-async function fetchOIHistory(coin: string, candles: Candle[]): Promise<OIRecord[]> {
-  const raw = await fetchJSON(
-    `${BB_BASE}/v5/market/open-interest?category=linear&symbol=${coin}USDT&intervalTime=1h&limit=20`
-  ) as { result?: { list?: { timestamp: string; openInterest: string }[] } };
+async function fetchOIHistory(
+  coin: string,
+  candles: Candle[],
+): Promise<OIRecord[]> {
+  const raw = (await fetchJSON(
+    `${BB_BASE}/v5/market/open-interest?category=linear&symbol=${coin}USDT&intervalTime=1h&limit=20`,
+  )) as { result?: { list?: { timestamp: string; openInterest: string }[] } };
 
   // Build price lookup for USD conversion (Bybit OI is in contracts, not USD)
   const priceByHour: Record<number, number> = {};
   for (const c of candles) priceByHour[floorH(c.t)] = c.c;
   const currentPrice = candles[candles.length - 1].c;
 
-  return (raw?.result?.list ?? [])
-    .reverse()
-    .map(r => {
-      const ts    = parseInt(r.timestamp);
-      const price = priceByHour[floorH(ts)] ?? currentPrice;
-      return { timeMs: ts, oiUsd: parseFloat(r.openInterest) * price };
-    });
+  return (raw?.result?.list ?? []).reverse().map((r) => {
+    const ts = parseInt(r.timestamp);
+    const price = priceByHour[floorH(ts)] ?? currentPrice;
+    return { timeMs: ts, oiUsd: parseFloat(r.openInterest) * price };
+  });
 }
 
 // ─── Funding by hour ─────────────────────────────────────────────────────────
@@ -289,7 +330,7 @@ function buildFundingByHour(records: FundingRecord[]): Record<number, number> {
   let last = 0;
   let rIdx = 0;
   const startTs = floorH(sorted[0].timeMs);
-  const endTs   = floorH(Date.now()) + HOUR;
+  const endTs = floorH(Date.now()) + HOUR;
 
   for (let ts = startTs; ts <= endTs; ts += HOUR) {
     while (rIdx < sorted.length && floorH(sorted[rIdx].timeMs) <= ts) {
@@ -304,114 +345,168 @@ function buildFundingByHour(records: FundingRecord[]): Record<number, number> {
 // ─── Signal detection ─────────────────────────────────────────────────────────
 function computeRSI(candles: Candle[], period = 14): number {
   if (candles.length < period + 1) return 50;
-  let gains = 0, losses = 0;
+  let gains = 0,
+    losses = 0;
   for (let i = candles.length - period; i < candles.length; i++) {
     const diff = candles[i].c - candles[i - 1].c;
-    if (diff > 0) gains += diff; else losses -= diff;
+    if (diff > 0) gains += diff;
+    else losses -= diff;
   }
   if (losses === 0) return 100;
-  return 100 - (100 / (1 + (gains / period) / (losses / period)));
+  return 100 - 100 / (1 + gains / period / (losses / period));
 }
 
 function detectPumpTop(
-  candles:    Candle[],
+  candles: Candle[],
   fundingNow: number,
 ): { triggered: boolean; candlePct: number; volMult: number; rsi: number } {
-  if (candles.length < 50) return { triggered: false, candlePct: 0, volMult: 0, rsi: 0 };
-  const last       = candles[candles.length - 1];
-  const prev       = candles[candles.length - 2];
-  const candlePct  = (last.h - prev.c) / (prev.c || 1) * 100;
-  const avgVol     = avgArr(candles.slice(-49, -1).map(c => c.v));
-  const volMult    = avgVol > 0 ? last.v / avgVol : 0;
-  const rsi        = computeRSI(candles);
+  if (candles.length < 50)
+    return { triggered: false, candlePct: 0, volMult: 0, rsi: 0 };
+  const last = candles[candles.length - 1];
+  const prev = candles[candles.length - 2];
+  const candlePct = ((last.h - prev.c) / (prev.c || 1)) * 100;
+  const avgVol = avgArr(candles.slice(-49, -1).map((c) => c.v));
+  const volMult = avgVol > 0 ? last.v / avgVol : 0;
+  const rsi = computeRSI(candles);
   const fundingApr = fundingNow * 8760 * 100;
   return {
-    triggered: candlePct >= PARAMS.pumpMinPct && volMult >= PARAMS.pumpMinVolMult &&
-               rsi >= PARAMS.pumpMinRsi && fundingApr >= PARAMS.pumpMinFundingApr,
-    candlePct, volMult, rsi,
+    triggered:
+      candlePct >= PARAMS.pumpMinPct &&
+      volMult >= PARAMS.pumpMinVolMult &&
+      rsi >= PARAMS.pumpMinRsi &&
+      fundingApr >= PARAMS.pumpMinFundingApr,
+    candlePct,
+    volMult,
+    rsi,
   };
 }
 
 function detectShortSqueeze(
   candleWindow: Candle[],
-  oiSeries:     number[],
-  fundingNow:   number,
-): { triggered: boolean; phase: "BUILDING" | "EXHAUSTION" | null;
-     cumulativePct: number; oiDropPct: number; fundingApr: number } {
-  const none = { triggered: false, phase: null as null, cumulativePct: 0, oiDropPct: 0, fundingApr: 0 };
+  oiSeries: number[],
+  fundingNow: number,
+): {
+  triggered: boolean;
+  phase: "BUILDING" | "EXHAUSTION" | null;
+  cumulativePct: number;
+  oiDropPct: number;
+  fundingApr: number;
+} {
+  const none = {
+    triggered: false,
+    phase: null as null,
+    cumulativePct: 0,
+    oiDropPct: 0,
+    fundingApr: 0,
+  };
   const N = PARAMS.squeezeHours;
   if (candleWindow.length < N + 2) return none;
 
-  const startClose    = candleWindow[candleWindow.length - N - 1].c;
-  const windowHigh    = Math.max(...candleWindow.slice(-N).map(c => c.h));
-  const cumulativePct = startClose > 0 ? (windowHigh - startClose) / startClose * 100 : 0;
-  const fundingApr    = fundingNow * 8760 * 100;
-  let   oiDropPct     = 0;
+  const startClose = candleWindow[candleWindow.length - N - 1].c;
+  const windowHigh = Math.max(...candleWindow.slice(-N).map((c) => c.h));
+  const cumulativePct =
+    startClose > 0 ? ((windowHigh - startClose) / startClose) * 100 : 0;
+  const fundingApr = fundingNow * 8760 * 100;
+  let oiDropPct = 0;
 
   if (oiSeries.length >= 2) {
     const oiStart = oiSeries[Math.max(0, oiSeries.length - N - 1)];
-    const oiNow   = oiSeries[oiSeries.length - 1];
-    oiDropPct = oiStart > 0 ? (oiStart - oiNow) / oiStart * 100 : 0;
+    const oiNow = oiSeries[oiSeries.length - 1];
+    oiDropPct = oiStart > 0 ? ((oiStart - oiNow) / oiStart) * 100 : 0;
   }
 
-  const isSqueeze = cumulativePct >= PARAMS.squeezeMinPct &&
-                    fundingApr    <= PARAMS.squeezeMaxFundingApr;
+  const isSqueeze =
+    cumulativePct >= PARAMS.squeezeMinPct &&
+    fundingApr <= PARAMS.squeezeMaxFundingApr;
 
-  const avgCandleMove = avgArr(candleWindow.slice(-N).map(c =>
-    Math.abs((c.c - c.o) / (c.o || 1) * 100)));
+  const avgCandleMove = avgArr(
+    candleWindow
+      .slice(-N)
+      .map((c) => Math.abs(((c.c - c.o) / (c.o || 1)) * 100)),
+  );
   const c1 = candleWindow[candleWindow.length - 1];
   const c2 = candleWindow[candleWindow.length - 2];
-  const recentAvg = (Math.abs((c1.c - c1.o) / (c1.o || 1) * 100) +
-                     Math.abs((c2.c - c2.o) / (c2.o || 1) * 100)) / 2;
-  const lowerHigh = candleWindow.length >= 3 &&
-    c1.h < candleWindow[candleWindow.length - 3].h;
+  const recentAvg =
+    (Math.abs(((c1.c - c1.o) / (c1.o || 1)) * 100) +
+      Math.abs(((c2.c - c2.o) / (c2.o || 1)) * 100)) /
+    2;
+  const lowerHigh =
+    candleWindow.length >= 3 && c1.h < candleWindow[candleWindow.length - 3].h;
 
-  const exhaustOiOk = PARAMS.exhaustMinOiDrop <= 0 ||
-                      oiDropPct >= PARAMS.exhaustMinOiDrop;
+  const exhaustOiOk =
+    PARAMS.exhaustMinOiDrop <= 0 || oiDropPct >= PARAMS.exhaustMinOiDrop;
 
-  const isExhausting = cumulativePct >= PARAMS.squeezeMinPct * 0.8 &&
-                       fundingApr    >  PARAMS.exhaustMaxFundingApr &&
-                       fundingApr    <  5 &&
-                       recentAvg     <  avgCandleMove * 0.5 &&
-                       lowerHigh &&
-                       exhaustOiOk;
+  const isExhausting =
+    cumulativePct >= PARAMS.squeezeMinPct * 0.8 &&
+    fundingApr > PARAMS.exhaustMaxFundingApr &&
+    fundingApr < 5 &&
+    recentAvg < avgCandleMove * 0.5 &&
+    lowerHigh &&
+    exhaustOiOk;
 
-  if (isSqueeze)    return { triggered: true, phase: "BUILDING",   cumulativePct, oiDropPct, fundingApr };
-  if (isExhausting) return { triggered: true, phase: "EXHAUSTION", cumulativePct, oiDropPct, fundingApr };
+  if (isSqueeze)
+    return {
+      triggered: true,
+      phase: "BUILDING",
+      cumulativePct,
+      oiDropPct,
+      fundingApr,
+    };
+  if (isExhausting)
+    return {
+      triggered: true,
+      phase: "EXHAUSTION",
+      cumulativePct,
+      oiDropPct,
+      fundingApr,
+    };
   return none;
 }
 
-function isTrendingFull(priceNow: number, price7dAgo: number, price14dAgo: number): boolean {
-  const rise7d  = price7dAgo  > 0 ? (priceNow - price7dAgo)  / price7dAgo  * 100 : 0;
-  const rise14d = price14dAgo > 0 ? (priceNow - price14dAgo) / price14dAgo * 100 : 0;
+function isTrendingFull(
+  priceNow: number,
+  price7dAgo: number,
+  price14dAgo: number,
+): boolean {
+  const rise7d =
+    price7dAgo > 0 ? ((priceNow - price7dAgo) / price7dAgo) * 100 : 0;
+  const rise14d =
+    price14dAgo > 0 ? ((priceNow - price14dAgo) / price14dAgo) * 100 : 0;
   return rise7d >= PARAMS.trendDays7Pct && rise14d >= PARAMS.trendDays14Pct;
 }
 
 // ─── Gate 2 ───────────────────────────────────────────────────────────────────
 function checkGate2(
   oiHistory: OIRecord[],
-  candles:   Candle[],
+  candles: Candle[],
 ): { passes: boolean; oiChangePct: number; priceChangePct: number } {
-  if (oiHistory.length < 5) return { passes: false, oiChangePct: 0, priceChangePct: 0 };
-  const oiNow       = oiHistory[oiHistory.length - 1].oiUsd;
-  const oi4hAgo     = oiHistory[oiHistory.length - 5].oiUsd;
-  const oiChangePct = oi4hAgo > 0 ? (oiNow - oi4hAgo) / oi4hAgo * 100 : 0;
-  const priceNow    = candles[candles.length - 1].c;
-  const price4hAgo  = candles.length >= 5 ? candles[candles.length - 5].c : priceNow;
-  const priceChangePct = Math.abs((priceNow - price4hAgo) / (price4hAgo || 1) * 100);
+  if (oiHistory.length < 5)
+    return { passes: false, oiChangePct: 0, priceChangePct: 0 };
+  const oiNow = oiHistory[oiHistory.length - 1].oiUsd;
+  const oi4hAgo = oiHistory[oiHistory.length - 5].oiUsd;
+  const oiChangePct = oi4hAgo > 0 ? ((oiNow - oi4hAgo) / oi4hAgo) * 100 : 0;
+  const priceNow = candles[candles.length - 1].c;
+  const price4hAgo =
+    candles.length >= 5 ? candles[candles.length - 5].c : priceNow;
+  const priceChangePct = Math.abs(
+    ((priceNow - price4hAgo) / (price4hAgo || 1)) * 100,
+  );
   return {
-    passes: oiChangePct >= PARAMS.minOiChangePct && priceChangePct <= PARAMS.maxPriceChangePct,
-    oiChangePct, priceChangePct,
+    passes:
+      oiChangePct >= PARAMS.minOiChangePct &&
+      priceChangePct <= PARAMS.maxPriceChangePct,
+    oiChangePct,
+    priceChangePct,
   };
 }
 
 // ─── Confidence scoring ───────────────────────────────────────────────────────
 function getConfidence(
-  phase:           string,
+  phase: string,
   msSinceBuilding: number | null,
 ): "HIGH" | "MEDIUM" | "LOW" {
   if (phase === "TREND_BREAK") return "HIGH";
-  if (phase === "BUILDING")    return "MEDIUM";
+  if (phase === "BUILDING") return "MEDIUM";
   if (phase === "EXHAUSTION") {
     if (msSinceBuilding === null) return "LOW";
     const hours = msSinceBuilding / HOUR;
@@ -424,42 +519,52 @@ function getConfidence(
 
 // ─── Core per-coin scanner ────────────────────────────────────────────────────
 function scanCoin(
-  coin:          string,
-  state:         CoinState,
-  candles:       Candle[],
+  coin: string,
+  state: CoinState,
+  candles: Candle[],
   mergedFunding: Record<number, number>,
-  oiHistory:     OIRecord[],
+  oiHistory: OIRecord[],
 ): { alerts: Alert[]; newState: CoinState } {
-  const alerts:   Alert[]   = [];
+  const alerts: Alert[] = [];
   const newState: CoinState = { ...state };
 
   if (candles.length < PARAMS.squeezeHours + 15) return { alerts, newState };
 
-  const price      = candles[candles.length - 1].c;
-  const ts         = candles[candles.length - 1].t;
-  const fRate      = mergedFunding[floorH(ts)] ?? 0;
+  const price = candles[candles.length - 1].c;
+  const ts = candles[candles.length - 1].t;
+  const fRate = mergedFunding[floorH(ts)] ?? 0;
   const fundingApr = fRate * 8760 * 100;
-  const oiSeries   = oiHistory.map(r => r.oiUsd);
+  const oiSeries = oiHistory.map((r) => r.oiUsd);
 
   // ── Gate 1: crowded longs ─────────────────────────────────────────────────
-  const last8         = getLast8HourlyFundingReadings(mergedFunding, ts);
-  const positiveCount = last8.filter(r => r * 8760 * 100 >= PARAMS.fundingAprThreshold).length;
-  const gate1Passes   = positiveCount >= PARAMS.minPositiveReadings;
-  const recentBldg    = newState.lastBuildingSignalMs !== null &&
-    (ts - newState.lastBuildingSignalMs) < 48 * HOUR;
-  const fundingCooled = newState.lastFundingAlertMs === null ||
-    (ts - newState.lastFundingAlertMs) >= FUNDING_COOLDOWN_MS;
+  const last8 = getLast8HourlyFundingReadings(mergedFunding, ts);
+  const positiveCount = last8.filter(
+    (r) => r * 8760 * 100 >= PARAMS.fundingAprThreshold,
+  ).length;
+  const gate1Passes = positiveCount >= PARAMS.minPositiveReadings;
+  const recentBldg =
+    newState.lastBuildingSignalMs !== null &&
+    ts - newState.lastBuildingSignalMs < 48 * HOUR;
+  const fundingCooled =
+    newState.lastFundingAlertMs === null ||
+    ts - newState.lastFundingAlertMs >= FUNDING_COOLDOWN_MS;
 
-  if (fundingApr < PARAMS.fundingAprThreshold) newState.lastFundingAlertMs = null;
+  if (fundingApr < PARAMS.fundingAprThreshold)
+    newState.lastFundingAlertMs = null;
 
   if (gate1Passes && !recentBldg && fundingCooled) {
     const gate2 = checkGate2(oiHistory, candles);
     if (gate2.passes) {
       alerts.push({
-        coin, type: "FUNDING", firedAt: ts, firedAtStr: fmtDate(ts),
-        entry: price, fundingApr,
+        coin,
+        type: "FUNDING",
+        firedAt: ts,
+        firedAtStr: fmtDate(ts),
+        entry: price,
+        fundingApr,
         details: `Funding: ${fundingApr.toFixed(1)}% APR | OI: +${gate2.oiChangePct.toFixed(1)}% over 4h`,
-        confidence: "MEDIUM", msSinceBuilding: null,
+        confidence: "MEDIUM",
+        msSinceBuilding: null,
       });
       newState.lastFundingAlertMs = ts;
     }
@@ -469,17 +574,24 @@ function scanCoin(
   const pump = detectPumpTop(candles, fRate);
   if (pump.triggered) {
     alerts.push({
-      coin, type: "PUMP_TOP", firedAt: ts, firedAtStr: fmtDate(ts),
-      entry: price, fundingApr,
+      coin,
+      type: "PUMP_TOP",
+      firedAt: ts,
+      firedAtStr: fmtDate(ts),
+      entry: price,
+      fundingApr,
       details: `Candle: +${pump.candlePct.toFixed(1)}% | Volume: ×${pump.volMult.toFixed(0)} | RSI: ${pump.rsi.toFixed(0)}`,
-      confidence: "HIGH", msSinceBuilding: null,
+      confidence: "HIGH",
+      msSinceBuilding: null,
     });
   }
 
   // ── Trend filter ──────────────────────────────────────────────────────────
-  const price7d  = getPriceHoursAgo(candles, 7  * 24);
+  const price7d = getPriceHoursAgo(candles, 7 * 24);
   const price14d = getPriceHoursAgo(candles, 14 * 24);
-  const trending = price7d !== null && price14d !== null &&
+  const trending =
+    price7d !== null &&
+    price14d !== null &&
     isTrendingFull(price, price7d, price14d);
 
   // Trend exit detection — runs every hour regardless of squeeze state
@@ -493,71 +605,104 @@ function scanCoin(
 
   if (sq.triggered && sq.phase) {
     if (sq.phase === "BUILDING") {
-      if (newState.squeezeWaveStartMs === null) newState.squeezeWaveStartMs = ts;
+      if (newState.squeezeWaveStartMs === null)
+        newState.squeezeWaveStartMs = ts;
       if (sq.fundingApr < newState.lastBuildingMinFunding)
         newState.lastBuildingMinFunding = sq.fundingApr;
     }
-    if (price > newState.squeezeWaveHighPrice) newState.squeezeWaveHighPrice = price;
+    if (price > newState.squeezeWaveHighPrice)
+      newState.squeezeWaveHighPrice = price;
 
-    const isTrendBreak = trending && sq.phase === "EXHAUSTION" &&
+    const isTrendBreak =
+      trending &&
+      sq.phase === "EXHAUSTION" &&
       newState.lastBuildingMinFunding <= PARAMS.trendBreakFundingApr;
-    const allowNormal  = !trending &&
-      (sq.phase === "BUILDING" || sq.phase === "EXHAUSTION");
+    const allowNormal =
+      !trending && (sq.phase === "BUILDING" || sq.phase === "EXHAUSTION");
 
     if (isTrendBreak || allowNormal) {
-      const phase          = isTrendBreak ? "TREND_BREAK" : sq.phase!;
-      const msSinceBuilding = newState.lastBuildingSignalMs !== null
-        ? ts - newState.lastBuildingSignalMs : null;
+      const phase = isTrendBreak ? "TREND_BREAK" : sq.phase!;
+      const msSinceBuilding =
+        newState.lastBuildingSignalMs !== null
+          ? ts - newState.lastBuildingSignalMs
+          : null;
       const confidence = getConfidence(phase, msSinceBuilding);
 
-      const hoursSinceExhaustion = newState.lastExhaustionMs !== null
-        ? (ts - newState.lastExhaustionMs) / HOUR : Infinity;
+      const hoursSinceExhaustion =
+        newState.lastExhaustionMs !== null
+          ? (ts - newState.lastExhaustionMs) / HOUR
+          : Infinity;
 
       const alreadyFired =
-        (phase === "BUILDING"    && newState.waveAlertedBuilding)  ||
-        (phase === "EXHAUSTION"  && hoursSinceExhaustion < MIN_EXHAUSTION_GAP_H) ||
+        (phase === "BUILDING" && newState.waveAlertedBuilding) ||
+        (phase === "EXHAUSTION" &&
+          hoursSinceExhaustion < MIN_EXHAUSTION_GAP_H) ||
         (phase === "TREND_BREAK" && newState.waveAlertedTrendBreak);
 
       if (!alreadyFired) {
         const details =
-          phase === "BUILDING"    ? `Squeeze: +${sq.cumulativePct.toFixed(1)}% over ${PARAMS.squeezeHours}h | Funding: ${fundingApr.toFixed(0)}% APR` :
-          phase === "EXHAUSTION"  ? `Squeeze: +${sq.cumulativePct.toFixed(1)}% over ${PARAMS.squeezeHours}h | Funding: ${fundingApr.toFixed(1)}% APR` :
-          /* TREND_BREAK */         `Squeeze: +${sq.cumulativePct.toFixed(1)}% over ${PARAMS.squeezeHours}h | Prior funding: ${newState.lastBuildingMinFunding.toFixed(0)}% APR`;
+          phase === "BUILDING"
+            ? `Squeeze: +${sq.cumulativePct.toFixed(1)}% over ${PARAMS.squeezeHours}h | Funding: ${fundingApr.toFixed(0)}% APR`
+            : phase === "EXHAUSTION"
+              ? `Squeeze: +${sq.cumulativePct.toFixed(1)}% over ${PARAMS.squeezeHours}h | Funding: ${fundingApr.toFixed(1)}% APR`
+              : /* TREND_BREAK */ `Squeeze: +${sq.cumulativePct.toFixed(1)}% over ${PARAMS.squeezeHours}h | Prior funding: ${newState.lastBuildingMinFunding.toFixed(0)}% APR`;
 
         alerts.push({
-          coin, type: phase, firedAt: ts, firedAtStr: fmtDate(ts),
-          entry: price, fundingApr, details, confidence, msSinceBuilding,
+          coin,
+          type: phase,
+          firedAt: ts,
+          firedAtStr: fmtDate(ts),
+          entry: price,
+          fundingApr,
+          details,
+          confidence,
+          msSinceBuilding,
         });
 
-        if (phase === "BUILDING")    { newState.waveAlertedBuilding  = true; newState.lastBuildingSignalMs = ts; }
-        if (phase === "EXHAUSTION")  { newState.lastExhaustionMs      = ts; }
-        if (phase === "TREND_BREAK") { newState.waveAlertedTrendBreak = true; }
+        if (phase === "BUILDING") {
+          newState.waveAlertedBuilding = true;
+          newState.lastBuildingSignalMs = ts;
+        }
+        if (phase === "EXHAUSTION") {
+          newState.lastExhaustionMs = ts;
+        }
+        if (phase === "TREND_BREAK") {
+          newState.waveAlertedTrendBreak = true;
+        }
       }
 
       newState.lastSqueezePhase = phase;
     }
-
   } else if (!sq.triggered) {
-    newState.squeezeWaveStartMs   = null;
+    newState.squeezeWaveStartMs = null;
     newState.squeezeWaveHighPrice = 0;
-    newState.waveAlertedBuilding  = false;
-    newState.lastExhaustionMs     = null;
-    if (newState.lastSqueezePhase === "BUILDING") newState.lastSqueezePhase = null;
+    newState.waveAlertedBuilding = false;
+    newState.lastExhaustionMs = null;
+    if (newState.lastSqueezePhase === "BUILDING")
+      newState.lastSqueezePhase = null;
   }
 
   return { alerts, newState };
 }
 
 // ─── Telegram ─────────────────────────────────────────────────────────────────
-const TELEGRAM_TOKEN   = process.env.TELEGRAM_TOKEN   ?? "";
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN ?? "";
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID ?? "";
-const DRY_RUN          = process.argv.includes("--dry-run");
+const DRY_RUN = process.argv.includes("--dry-run");
 
 function formatAlert(alert: Alert): string {
-  const icons:     Record<string, string> = {
-    FUNDING: "💰", PUMP_TOP: "🚀", BUILDING: "⚠️", EXHAUSTION: "🎯", TREND_BREAK: "🚨",
+  const icons: Record<string, string> = {
+    FUNDING: "💰",
+    PUMP_TOP: "🚀",
+    BUILDING: "⚠️",
+    EXHAUSTION: "🎯",
+    TREND_BREAK: "🚨",
   };
-  const confIcons: Record<string, string> = { HIGH: "🟢", MEDIUM: "🟡", LOW: "🔴" };
+  const confIcons: Record<string, string> = {
+    HIGH: "🟢",
+    MEDIUM: "🟡",
+    LOW: "🔴",
+  };
 
   const lines = [
     `${icons[alert.type] ?? "📡"} *ALTSHORTBOT — ${alert.coin}*`,
@@ -598,16 +743,17 @@ async function sendTelegram(message: string): Promise<void> {
     const res = await fetch(
       `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
       {
-        method:  "POST",
+        method: "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({
-          chat_id:    TELEGRAM_CHAT_ID,
-          text:       message,
+        body: JSON.stringify({
+          chat_id: TELEGRAM_CHAT_ID,
+          text: message,
           parse_mode: "Markdown",
         }),
-      }
+      },
     );
-    if (!res.ok) console.error(`Telegram error ${res.status}: ${await res.text()}`);
+    if (!res.ok)
+      console.error(`Telegram error ${res.status}: ${await res.text()}`);
   } catch (err) {
     // Log but do not rethrow — failure is non-fatal; state still saves; scanner continues
     console.error(`Telegram send failed: ${(err as Error).message}`);
@@ -620,7 +766,10 @@ async function getCoins(): Promise<string[]> {
   const env = process.env.SCANNER_COINS;
   if (arg ?? env) {
     // Explicit override — use as-is
-    return (arg ?? env)!.split(",").map(c => c.trim().toUpperCase()).filter(Boolean);
+    return (arg ?? env)!
+      .split(",")
+      .map((c) => c.trim().toUpperCase())
+      .filter(Boolean);
   }
   // Fetch full coin universe from Bybit
   return fetchAllCoins();
@@ -643,22 +792,32 @@ async function main(): Promise<void> {
         fetchFundingBybit(coin),
       ]);
 
-      if (candles.length < 50) { console.log("insufficient data"); continue; }
+      if (candles.length < 50) {
+        console.log("insufficient data");
+        continue;
+      }
 
-      const oiHistory    = await fetchOIHistory(coin, candles);
+      const oiHistory = await fetchOIHistory(coin, candles);
       const fundingByHour = buildFundingByHour(bbFunding);
-      const coinState    = state[coin] ?? defaultState();
+      const coinState = state[coin] ?? defaultState();
 
-      const { alerts, newState } = scanCoin(coin, coinState, candles, fundingByHour, oiHistory);
+      const { alerts, newState } = scanCoin(
+        coin,
+        coinState,
+        candles,
+        fundingByHour,
+        oiHistory,
+      );
       state[coin] = newState;
 
       if (alerts.length) {
-        console.log(`${alerts.length} signal(s): ${alerts.map(a => a.type).join(", ")}`);
+        console.log(
+          `${alerts.length} signal(s): ${alerts.map((a) => a.type).join(", ")}`,
+        );
         allAlerts.push(...alerts);
       } else {
         console.log("no signals");
       }
-
     } catch (err) {
       console.log(`error: ${(err as Error).message}`);
     }
@@ -688,6 +847,19 @@ async function main(): Promise<void> {
     ) {
       appendToQueue(alert);
     }
+
+    if (alert.type === "BUILDING") {
+      // Parse squeeze % from details string e.g. "Squeeze: +20.6% over 10h | ..."
+      const squeezeMatch = alert.details.match(/\+([\d.]+)%/);
+      logBuildingSignal({
+        coin: alert.coin,
+        firedAt: new Date().toISOString(),
+        firedAtMs: Date.now(),
+        entry: alert.entry,
+        fundingApr: alert.fundingApr,
+        squeeze: squeezeMatch ? parseFloat(squeezeMatch[1]) : 0,
+      });
+    }
   }
   saveState(state);
 
@@ -698,9 +870,9 @@ async function watchMode(): Promise<void> {
   console.log("AltShortBot — watch mode (runs on the hour)");
   while (true) {
     await main();
-    const now      = Date.now();
+    const now = Date.now();
     const nextHour = Math.ceil(now / HOUR) * HOUR;
-    const sleepMs  = nextHour - now + 5_000; // +5s past the hour
+    const sleepMs = nextHour - now + 5_000; // +5s past the hour
     console.log(`Next scan in ${Math.round(sleepMs / 60_000)} min`);
     await sleep(sleepMs);
   }
@@ -719,5 +891,5 @@ if (process.argv[1] === __filename) {
   (process.argv.includes("--watch") ? watchMode() : main()).catch(onCrash);
 }
 
-export { scanCoin, defaultState, buildFundingByHour };
+export { buildFundingByHour, defaultState, scanCoin };
 export type { CoinState };

@@ -13,19 +13,19 @@
  *   npx tsx hl_executor.ts --status   ← print open positions and P&L
  */
 
-import { readFileSync, writeFileSync, existsSync, appendFileSync } from "fs";
 import { ExchangeClient, HttpTransport } from "@nktkas/hyperliquid";
 import { formatPrice, formatSize } from "@nktkas/hyperliquid/utils";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "fs";
 import { privateKeyToAccount } from "viem/accounts";
 import type {
-  QueuedSignal,
-  PositionStore,
   PaperTrade,
+  PositionStore,
+  QueuedSignal,
 } from "./shared_types.ts";
 
 // ─── Mode and config ──────────────────────────────────────────────────────────
-const IS_PAPER   = process.argv.includes("--paper");
-const IS_STATUS  = process.argv.includes("--status");
+const IS_PAPER = process.argv.includes("--paper");
+const IS_STATUS = process.argv.includes("--status");
 const IS_TESTNET = process.env.HL_TESTNET === "1";
 
 const API_URL = IS_TESTNET
@@ -33,23 +33,23 @@ const API_URL = IS_TESTNET
   : "https://api.hyperliquid.xyz";
 
 const WALLET_ADDRESS = process.env.HL_WALLET_ADDRESS ?? "";
-const AGENT_KEY      = process.env.HL_AGENT_KEY      ?? "";
+const AGENT_KEY = process.env.HL_AGENT_KEY ?? "";
 
-const QUEUE_FILE     = "signal_queue.json";
+const QUEUE_FILE = "signal_queue.json";
 const POSITIONS_FILE = "hl_positions.json";
-const PAPER_LOG_FILE = "paper_trades.jsonl";  // one JSON object per line
+const PAPER_LOG_FILE = "paper_trades.jsonl"; // one JSON object per line
 
 // Risk parameters — tune before going live
 const RISK = {
-  riskPerTrade:     0.02,   // 2% account per trade
-  stopLossPct:      0.12,   // stop at +12% adverse (price rises 12%)
-  initialTargetPct: 0.20,   // initial take-profit at -20%
-  trailingStopPct:  0.05,   // trail stop by 5% once in profit
-  breakevenAtPct:   0.10,   // move stop to breakeven after -10% move
-  maxHoldHours:     72,     // force-close after 3 days
-  maxLeverage:      3,
-  maxPositions:     3,      // never hold >3 simultaneous shorts
-  minNotionalUsdc:  10,     // minimum $10 per trade
+  riskPerTrade: 0.02, // 2% account per trade
+  stopLossPct: 0.12, // stop at +12% adverse (price rises 12%)
+  initialTargetPct: 0.2, // initial take-profit at -20%
+  trailingStopPct: 0.05, // trail stop by 5% once in profit
+  breakevenAtPct: 0.1, // move stop to breakeven after -10% move
+  maxHoldHours: 72, // force-close after 3 days
+  maxLeverage: 3,
+  maxPositions: 3, // never hold >3 simultaneous shorts
+  minNotionalUsdc: 10, // minimum $10 per trade
 } as const;
 
 // These signals are traded. Others are Telegram-only.
@@ -58,8 +58,11 @@ const TRADEABLE = new Set(["EXHAUSTION", "TREND_BREAK"]);
 // ─── State persistence ────────────────────────────────────────────────────────
 function loadQueue(): QueuedSignal[] {
   if (!existsSync(QUEUE_FILE)) return [];
-  try { return JSON.parse(readFileSync(QUEUE_FILE, "utf8")); }
-  catch { return []; }
+  try {
+    return JSON.parse(readFileSync(QUEUE_FILE, "utf8"));
+  } catch {
+    return [];
+  }
 }
 
 function clearQueue(): void {
@@ -68,8 +71,11 @@ function clearQueue(): void {
 
 function loadPositions(): PositionStore {
   if (!existsSync(POSITIONS_FILE)) return {};
-  try { return JSON.parse(readFileSync(POSITIONS_FILE, "utf8")); }
-  catch { return {}; }
+  try {
+    return JSON.parse(readFileSync(POSITIONS_FILE, "utf8"));
+  } catch {
+    return {};
+  }
 }
 
 function savePositions(store: PositionStore): void {
@@ -81,7 +87,7 @@ function logPaperTrade(trade: PaperTrade): void {
 }
 
 // ─── Telegram ─────────────────────────────────────────────────────────────────
-const TELEGRAM_TOKEN   = process.env.TELEGRAM_TOKEN   ?? "";
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN ?? "";
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID ?? "";
 
 async function sendTelegram(message: string): Promise<void> {
@@ -91,11 +97,11 @@ async function sendTelegram(message: string): Promise<void> {
   }
   try {
     await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-      method:  "POST",
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({
-        chat_id:    TELEGRAM_CHAT_ID,
-        text:       message,
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        text: message,
         parse_mode: "Markdown",
       }),
     });
@@ -116,59 +122,76 @@ async function alertError(context: string, err: unknown): Promise<void> {
 // ─── Hyperliquid data fetching (read-only /info endpoint, no auth) ───────────
 async function hlPost(body: object): Promise<unknown> {
   const res = await fetch(`${API_URL}/info`, {
-    method:  "POST",
+    method: "POST",
     headers: { "Content-Type": "application/json" },
-    body:    JSON.stringify(body),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`HL API ${res.status}`);
   return res.json();
 }
 
 interface AssetMeta {
-  name:        string;
-  szDecimals:  number;
+  name: string;
+  szDecimals: number;
   maxLeverage: number;
   isDelisted?: boolean;
 }
 
-async function fetchAssetIndex(): Promise<Map<string, { idx: number; szDecimals: number; maxLeverage: number }>> {
-  const { universe } = await hlPost({ type: "meta" }) as { universe: AssetMeta[] };
-  const map = new Map<string, { idx: number; szDecimals: number; maxLeverage: number }>();
+async function fetchAssetIndex(): Promise<
+  Map<string, { idx: number; szDecimals: number; maxLeverage: number }>
+> {
+  const { universe } = (await hlPost({ type: "meta" })) as {
+    universe: AssetMeta[];
+  };
+  const map = new Map<
+    string,
+    { idx: number; szDecimals: number; maxLeverage: number }
+  >();
   universe.forEach((a, idx) => {
-    if (!a.isDelisted) map.set(a.name, { idx, szDecimals: a.szDecimals, maxLeverage: a.maxLeverage });
+    if (!a.isDelisted)
+      map.set(a.name, {
+        idx,
+        szDecimals: a.szDecimals,
+        maxLeverage: a.maxLeverage,
+      });
   });
   return map;
 }
 
 interface HLPosition {
   position: {
-    coin:          string;
-    szi:           string;   // negative = short
-    entryPx:       string;
+    coin: string;
+    szi: string; // negative = short
+    entryPx: string;
     liquidationPx: string;
     unrealizedPnl: string;
-    marginUsed:    string;
+    marginUsed: string;
   };
 }
 
 interface AccountState {
   assetPositions: HLPosition[];
-  marginSummary:  { accountValue: string; totalMarginUsed: string };
-  withdrawable:   string;
+  marginSummary: { accountValue: string; totalMarginUsed: string };
+  withdrawable: string;
 }
 
 async function fetchAccountState(): Promise<AccountState> {
   if (!WALLET_ADDRESS) throw new Error("HL_WALLET_ADDRESS not set");
-  return await hlPost({ type: "clearinghouseState", user: WALLET_ADDRESS }) as AccountState;
+  return (await hlPost({
+    type: "clearinghouseState",
+    user: WALLET_ADDRESS,
+  })) as AccountState;
 }
 
 async function fetchMarkPrices(): Promise<Map<string, number>> {
-  const [meta, ctxs] = await hlPost({ type: "metaAndAssetCtxs" }) as [
+  const [meta, ctxs] = (await hlPost({ type: "metaAndAssetCtxs" })) as [
     { universe: { name: string }[] },
     { markPx: string }[],
   ];
   const map = new Map<string, number>();
-  meta.universe.forEach((a, i) => map.set(a.name, parseFloat(ctxs[i]?.markPx ?? "0")));
+  meta.universe.forEach((a, i) =>
+    map.set(a.name, parseFloat(ctxs[i]?.markPx ?? "0")),
+  );
   return map;
 }
 
@@ -191,16 +214,16 @@ function getExchangeClient(): ExchangeClient {
 // stay in sync with whatever Hyperliquid changes about tick/lot rules.
 
 async function openShort(
-  assetIdx:   number,
+  assetIdx: number,
   szDecimals: number,
-  sizeCoin:   number,
-  markPrice:  number,
-  leverage:   number,
-  coin:       string,        // for alerting on leverage failure
+  sizeCoin: number,
+  markPrice: number,
+  leverage: number,
+  coin: string, // for alerting on leverage failure
 ): Promise<number | null> {
   if (IS_PAPER) return -1;
 
-  const client  = getExchangeClient();
+  const client = getExchangeClient();
 
   // Set leverage BEFORE the order. HL leverage is per-position-at-entry: if
   // we don't set it, HL uses whatever was last set for this asset (default
@@ -210,8 +233,8 @@ async function openShort(
   // against asset.maxLeverage — HL rejects values above the asset cap.
   try {
     await client.updateLeverage({
-      asset:    assetIdx,
-      isCross:  true,
+      asset: assetIdx,
+      isCross: true,
       leverage,
     });
   } catch (err) {
@@ -222,7 +245,7 @@ async function openShort(
     // network blip? account permission?) immediately.
     await sendTelegram(
       `⚠️ *${coin}* — updateLeverage(${leverage}×) failed: ${msg}\n` +
-      `Position NOT opened. Signal skipped to avoid trading at unknown leverage.`
+        `Position NOT opened. Signal skipped to avoid trading at unknown leverage.`,
     );
     return null;
   }
@@ -232,14 +255,16 @@ async function openShort(
 
   try {
     const result = await client.order({
-      orders: [{
-        a: assetIdx,
-        b: false,                    // false = sell (short)
-        p: limitPx,
-        s: sizeStr,
-        r: false,                    // not reduce-only — opening new position
-        t: { limit: { tif: "Ioc" } },// IOC = fill immediately or cancel
-      }],
+      orders: [
+        {
+          a: assetIdx,
+          b: false, // false = sell (short)
+          p: limitPx,
+          s: sizeStr,
+          r: false, // not reduce-only — opening new position
+          t: { limit: { tif: "Ioc" } }, // IOC = fill immediately or cancel
+        },
+      ],
       grouping: "na",
     });
     const status = result.response.data.statuses[0];
@@ -249,8 +274,12 @@ async function openShort(
       // will be slightly oversized on a partial fill, erring toward protection.
       return status.filled.oid;
     }
-    if (typeof status === "object" && "resting" in status) return status.resting.oid;
-    await alertError(`openShort ${coin}: unexpected status`, JSON.stringify(status));
+    if (typeof status === "object" && "resting" in status)
+      return status.resting.oid;
+    await alertError(
+      `openShort ${coin}: unexpected status`,
+      JSON.stringify(status),
+    );
     return null;
   } catch (err) {
     await alertError(`openShort ${coin}`, err);
@@ -259,38 +288,44 @@ async function openShort(
 }
 
 async function placeStopLoss(
-  assetIdx:   number,
+  assetIdx: number,
   szDecimals: number,
-  sizeCoin:   number,
-  stopPx:     number,
+  sizeCoin: number,
+  stopPx: number,
 ): Promise<number | null> {
   if (IS_PAPER) return -1;
 
-  const client  = getExchangeClient();
+  const client = getExchangeClient();
   const stopStr = formatPrice(stopPx, szDecimals);
   const sizeStr = formatSize(sizeCoin, szDecimals);
 
   try {
     const result = await client.order({
-      orders: [{
-        a: assetIdx,
-        b: true,                     // buy to close short
-        p: stopStr,
-        s: sizeStr,
-        r: true,                     // reduce-only
-        t: {
-          trigger: {
-            triggerPx: stopStr,
-            isMarket:  true,
-            tpsl:      "sl",
+      orders: [
+        {
+          a: assetIdx,
+          b: true, // buy to close short
+          p: stopStr,
+          s: sizeStr,
+          r: true, // reduce-only
+          t: {
+            trigger: {
+              triggerPx: stopStr,
+              isMarket: true,
+              tpsl: "sl",
+            },
           },
         },
-      }],
+      ],
       grouping: "na",
     });
     const status = result.response.data.statuses[0];
-    if (typeof status === "object" && "resting" in status) return status.resting.oid;
-    await alertError(`placeStopLoss: unexpected status`, JSON.stringify(status));
+    if (typeof status === "object" && "resting" in status)
+      return status.resting.oid;
+    await alertError(
+      `placeStopLoss: unexpected status`,
+      JSON.stringify(status),
+    );
     return null;
   } catch (err) {
     await alertError(`placeStopLoss`, err);
@@ -309,28 +344,30 @@ async function cancelOrder(assetIdx: number, oid: number): Promise<void> {
 }
 
 async function closePosition(
-  assetIdx:   number,
+  assetIdx: number,
   szDecimals: number,
-  sizeCoin:   number,
-  markPx:     number,
-  coin:       string,        // for alerting on failure
+  sizeCoin: number,
+  markPx: number,
+  coin: string, // for alerting on failure
 ): Promise<void> {
   if (IS_PAPER) return;
 
-  const client  = getExchangeClient();
+  const client = getExchangeClient();
   const limitPx = formatPrice(markPx * 1.005, szDecimals);
   const sizeStr = formatSize(sizeCoin, szDecimals);
 
   try {
     await client.order({
-      orders: [{
-        a: assetIdx,
-        b: true,                     // buy to close short
-        p: limitPx,
-        s: sizeStr,
-        r: true,                     // reduce-only
-        t: { limit: { tif: "Ioc" } },
-      }],
+      orders: [
+        {
+          a: assetIdx,
+          b: true, // buy to close short
+          p: limitPx,
+          s: sizeStr,
+          r: true, // reduce-only
+          t: { limit: { tif: "Ioc" } },
+        },
+      ],
       grouping: "na",
     });
   } catch (err) {
@@ -361,12 +398,12 @@ async function closePosition(
 // and risked 6% per trade despite the 2% riskPerTrade label.
 function calcPositionSize(
   accountValueUsdc: number,
-  markPrice:        number,
-  szDecimals:       number,
+  markPrice: number,
+  szDecimals: number,
 ): number {
-  const riskUsd  = accountValueUsdc * RISK.riskPerTrade;
+  const riskUsd = accountValueUsdc * RISK.riskPerTrade;
   const notional = riskUsd / RISK.stopLossPct;
-  const rawSize  = notional / markPrice;
+  const rawSize = notional / markPrice;
   // Round DOWN to szDecimals precision (never up — could push notional over budget).
   const factor = Math.pow(10, szDecimals);
   return Math.floor(rawSize * factor) / factor;
@@ -374,10 +411,13 @@ function calcPositionSize(
 
 // ─── Signal execution ────────────────────────────────────────────────────────
 async function executeSignal(
-  signal:       QueuedSignal,
-  assetIndex:   Map<string, { idx: number; szDecimals: number; maxLeverage: number }>,
-  markPrices:   Map<string, number>,
-  positions:    PositionStore,
+  signal: QueuedSignal,
+  assetIndex: Map<
+    string,
+    { idx: number; szDecimals: number; maxLeverage: number }
+  >,
+  markPrices: Map<string, number>,
+  positions: PositionStore,
   accountValue: number,
 ): Promise<void> {
   const { coin, type, confidence, entry } = signal;
@@ -385,72 +425,104 @@ async function executeSignal(
   // Validation guards.
   // confidence === "LOW" check is defense-in-depth — the scanner queue filter
   // already excludes LOW (Stage 1c), but a corrupted queue file could carry one.
-  if (!TRADEABLE.has(type))    { console.log(`${coin}: not tradeable (${type})`); return; }
-  if (confidence === "LOW")    { console.log(`${coin}: LOW confidence — skip`); return; }
-  if (positions[coin])         { console.log(`${coin}: already in position`); return; }
+  if (!TRADEABLE.has(type)) {
+    console.log(`${coin}: not tradeable (${type})`);
+    return;
+  }
+  if (confidence === "LOW") {
+    console.log(`${coin}: LOW confidence — skip`);
+    return;
+  }
+  if (positions[coin]) {
+    console.log(`${coin}: already in position`);
+    return;
+  }
   if (Object.keys(positions).length >= RISK.maxPositions) {
     console.log(`Max positions (${RISK.maxPositions}) reached — skip ${coin}`);
     return;
   }
 
   const asset = assetIndex.get(coin);
-  if (!asset) { console.log(`${coin}: not listed on Hyperliquid`); return; }
+  if (!asset) {
+    console.log(`${coin}: not listed on Hyperliquid`);
+    return;
+  }
 
   // Use mark price (current state) for sizing, not signal.entry (potentially stale
   // by up to 5 minutes between scanner write and executor pickup).
   const markPx = markPrices.get(coin) ?? entry;
 
-  const size     = calcPositionSize(accountValue, markPx, asset.szDecimals);
+  const size = calcPositionSize(accountValue, markPx, asset.szDecimals);
   const notional = size * markPx;
   if (notional < RISK.minNotionalUsdc) {
-    console.log(`${coin}: notional $${notional.toFixed(2)} below minimum $${RISK.minNotionalUsdc}`);
+    console.log(
+      `${coin}: notional $${notional.toFixed(2)} below minimum $${RISK.minNotionalUsdc}`,
+    );
     return;
   }
 
   const stopLossPx = markPx * (1 + RISK.stopLossPct);
-  const targetPx   = markPx * (1 - RISK.initialTargetPct);
-  const leverage   = Math.min(RISK.maxLeverage, asset.maxLeverage);
+  const targetPx = markPx * (1 - RISK.initialTargetPct);
+  const leverage = Math.min(RISK.maxLeverage, asset.maxLeverage);
 
   let stopOid: number | undefined = undefined;
 
   if (IS_PAPER) {
-    console.log(`📝 [PAPER] Short ${coin} @ $${markPx.toFixed(4)} | size: ${size} | stop: $${stopLossPx.toFixed(4)}`);
+    console.log(
+      `📝 [PAPER] Short ${coin} @ $${markPx.toFixed(4)} | size: ${size} | stop: $${stopLossPx.toFixed(4)}`,
+    );
   } else {
-    const oid = await openShort(asset.idx, asset.szDecimals, size, markPx, leverage, coin);
-    if (oid === null) { console.log(`${coin}: order failed`); return; }
+    const oid = await openShort(
+      asset.idx,
+      asset.szDecimals,
+      size,
+      markPx,
+      leverage,
+      coin,
+    );
+    if (oid === null) {
+      console.log(`${coin}: order failed`);
+      return;
+    }
 
-    stopOid = await placeStopLoss(asset.idx, asset.szDecimals, size, stopLossPx) ?? undefined;
+    stopOid =
+      (await placeStopLoss(asset.idx, asset.szDecimals, size, stopLossPx)) ??
+      undefined;
     if (stopOid === undefined) {
       // Stop-loss failed — close immediately to avoid an unprotected short.
       await closePosition(asset.idx, asset.szDecimals, size, markPx, coin);
-      await sendTelegram(`⚠️ *${coin}* — stop-loss placement failed. Position closed for safety.`);
+      await sendTelegram(
+        `⚠️ *${coin}* — stop-loss placement failed. Position closed for safety.`,
+      );
       return;
     }
-    console.log(`✅ Short ${coin} @ $${markPx.toFixed(4)} | oid=${oid} stopOid=${stopOid} lev=${leverage}×`);
+    console.log(
+      `✅ Short ${coin} @ $${markPx.toFixed(4)} | oid=${oid} stopOid=${stopOid} lev=${leverage}×`,
+    );
   }
 
   positions[coin] = {
     coin,
-    openedAt:         Date.now(),
-    entryPx:          markPx,
-    sizeCoin:         size,
-    notionalUsdc:     notional,
+    openedAt: Date.now(),
+    entryPx: markPx,
+    sizeCoin: size,
+    notionalUsdc: notional,
     stopLossPx,
     targetPx,
-    trailingActive:   false,
-    signalType:       type       as "EXHAUSTION" | "TREND_BREAK",
+    trailingActive: false,
+    signalType: type as "EXHAUSTION" | "TREND_BREAK",
     signalConfidence: confidence as "HIGH" | "MEDIUM",
     stopOid,
-    isPaper:          IS_PAPER,
+    isPaper: IS_PAPER,
   };
 
   await sendTelegram(
     `${IS_PAPER ? "📝 [PAPER]" : "✅"} *SHORT OPENED — ${coin}*\n` +
-    `Entry: $${markPx.toFixed(4)}\n` +
-    `Size: ${size} ${coin} ($${notional.toFixed(0)})\n` +
-    `Stop: $${stopLossPx.toFixed(4)} (+${(RISK.stopLossPct * 100).toFixed(0)}%)\n` +
-    `Target: $${targetPx.toFixed(4)} (-${(RISK.initialTargetPct * 100).toFixed(0)}%)\n` +
-    `Signal: ${type} [${confidence}]`
+      `Entry: $${markPx.toFixed(4)}\n` +
+      `Size: ${size} ${coin} ($${notional.toFixed(0)})\n` +
+      `Stop: $${stopLossPx.toFixed(4)} (+${(RISK.stopLossPct * 100).toFixed(0)}%)\n` +
+      `Target: $${targetPx.toFixed(4)} (-${(RISK.initialTargetPct * 100).toFixed(0)}%)\n` +
+      `Signal: ${type} [${confidence}]`,
   );
 }
 
@@ -459,36 +531,40 @@ async function executeSignal(
 // with exchange (catches positions closed by exchange-side stops), then
 // applies breakeven/trailing/target/timeout rules to each open position.
 async function managePositions(
-  positions:  PositionStore,
-  assetIndex: Map<string, { idx: number; szDecimals: number; maxLeverage: number }>,
+  positions: PositionStore,
+  assetIndex: Map<
+    string,
+    { idx: number; szDecimals: number; maxLeverage: number }
+  >,
   markPrices: Map<string, number>,
 ): Promise<void> {
-
   // Live mode: reconcile with exchange. Without this, a stop fired on the
   // exchange would leave a ghost entry in hl_positions.json — and the next
   // signal for that coin would be skipped by the "already in position" guard.
   if (!IS_PAPER && WALLET_ADDRESS) {
     try {
       const accountState = await fetchAccountState();
-      const liveCoins    = new Set(
+      const liveCoins = new Set(
         accountState.assetPositions
-          .filter(p => parseFloat(p.position.szi) !== 0)
-          .map(p => p.position.coin)
+          .filter((p) => parseFloat(p.position.szi) !== 0)
+          .map((p) => p.position.coin),
       );
       for (const coin of Object.keys(positions)) {
         if (!liveCoins.has(coin)) {
           // Position closed on exchange (stop triggered, liquidated, or
           // manually closed via the HL UI).
-          const pos     = positions[coin];
-          const markPx  = markPrices.get(coin) ?? pos.entryPx;
-          const pnlPct  = (pos.entryPx - markPx) / pos.entryPx * 100;
+          const pos = positions[coin];
+          const markPx = markPrices.get(coin) ?? pos.entryPx;
+          const pnlPct = ((pos.entryPx - markPx) / pos.entryPx) * 100;
           const pnlUsdc = (pos.entryPx - markPx) * pos.sizeCoin;
-          console.log(`${coin}: closed on exchange (stop/liq) Est. PnL: ${pnlPct.toFixed(1)}%`);
+          console.log(
+            `${coin}: closed on exchange (stop/liq) Est. PnL: ${pnlPct.toFixed(1)}%`,
+          );
           await sendTelegram(
             `🔔 *${coin} CLOSED ON EXCHANGE*\n` +
-            `Entry: $${pos.entryPx.toFixed(4)} → Mark: $${markPx.toFixed(4)}\n` +
-            `Est. P&L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}% ($${pnlUsdc >= 0 ? "+" : ""}${pnlUsdc.toFixed(2)})\n` +
-            `Reason: stop-loss triggered or liquidated`
+              `Entry: $${pos.entryPx.toFixed(4)} → Mark: $${markPx.toFixed(4)}\n` +
+              `Est. P&L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}% ($${pnlUsdc >= 0 ? "+" : ""}${pnlUsdc.toFixed(2)})\n` +
+              `Reason: stop-loss triggered or liquidated`,
           );
           delete positions[coin];
         }
@@ -504,9 +580,9 @@ async function managePositions(
     const markPx = markPrices.get(coin);
     if (markPx === undefined) continue;
 
-    const pnlPct    = (pos.entryPx - markPx) / pos.entryPx * 100;  // positive = profit
+    const pnlPct = ((pos.entryPx - markPx) / pos.entryPx) * 100; // positive = profit
     const hoursHeld = (Date.now() - pos.openedAt) / 3_600_000;
-    const asset     = assetIndex.get(coin);
+    const asset = assetIndex.get(coin);
     if (!asset) continue;
 
     let closeReason: "stop" | "target" | "trailing" | "timeout" | null = null;
@@ -517,16 +593,25 @@ async function managePositions(
 
     // Move stop to breakeven once we've banked breakevenAtPct of profit.
     if (!pos.trailingActive && pnlPct >= RISK.breakevenAtPct * 100) {
-      const newStop = pos.entryPx * 1.005;  // entry + 0.5% buffer
+      const newStop = pos.entryPx * 1.005; // entry + 0.5% buffer
       if (!IS_PAPER && pos.stopOid) {
         await cancelOrder(asset.idx, pos.stopOid);
-        const newOid = await placeStopLoss(asset.idx, asset.szDecimals, pos.sizeCoin, newStop);
+        const newOid = await placeStopLoss(
+          asset.idx,
+          asset.szDecimals,
+          pos.sizeCoin,
+          newStop,
+        );
         pos.stopOid = newOid ?? undefined;
       }
-      pos.stopLossPx     = newStop;
+      pos.stopLossPx = newStop;
       pos.trailingActive = true;
-      console.log(`${coin}: stop → breakeven $${newStop.toFixed(4)} (${pnlPct.toFixed(1)}% profit)`);
-      await sendTelegram(`🔄 *${coin}* stop moved to breakeven $${newStop.toFixed(4)} (${pnlPct.toFixed(1)}% profit)`);
+      console.log(
+        `${coin}: stop → breakeven $${newStop.toFixed(4)} (${pnlPct.toFixed(1)}% profit)`,
+      );
+      await sendTelegram(
+        `🔄 *${coin}* stop moved to breakeven $${newStop.toFixed(4)} (${pnlPct.toFixed(1)}% profit)`,
+      );
     }
 
     // Trail the stop down as price falls further.
@@ -535,7 +620,12 @@ async function managePositions(
       if (trailingStop < pos.stopLossPx) {
         if (!IS_PAPER && pos.stopOid) {
           await cancelOrder(asset.idx, pos.stopOid);
-          const newOid = await placeStopLoss(asset.idx, asset.szDecimals, pos.sizeCoin, trailingStop);
+          const newOid = await placeStopLoss(
+            asset.idx,
+            asset.szDecimals,
+            pos.sizeCoin,
+            trailingStop,
+          );
           pos.stopOid = newOid ?? undefined;
         }
         pos.stopLossPx = trailingStop;
@@ -545,72 +635,92 @@ async function managePositions(
     if (!closeReason && hoursHeld >= RISK.maxHoldHours) closeReason = "timeout";
 
     // Target hit (paper mode only — live could use a TP order; not implemented).
-    if (!closeReason && IS_PAPER && markPx <= pos.targetPx) closeReason = "target";
+    if (!closeReason && IS_PAPER && markPx <= pos.targetPx)
+      closeReason = "target";
 
     if (closeReason) {
       if (!IS_PAPER) {
         if (pos.stopOid) await cancelOrder(asset.idx, pos.stopOid);
-        await closePosition(asset.idx, asset.szDecimals, pos.sizeCoin, markPx, coin);
+        await closePosition(
+          asset.idx,
+          asset.szDecimals,
+          pos.sizeCoin,
+          markPx,
+          coin,
+        );
       }
 
       const pnlUsdc = (pos.entryPx - markPx) * pos.sizeCoin;
-      const emoji   = pnlUsdc >= 0 ? "✅" : "❌";
+      const emoji = pnlUsdc >= 0 ? "✅" : "❌";
 
       if (IS_PAPER) {
         logPaperTrade({
-          coin, openedAt: pos.openedAt, closedAt: Date.now(),
-          entryPx: pos.entryPx, exitPx: markPx,
+          coin,
+          openedAt: pos.openedAt,
+          closedAt: Date.now(),
+          entryPx: pos.entryPx,
+          exitPx: markPx,
           sizeCoin: pos.sizeCoin,
-          pnlUsdc, pnlPct,
+          pnlUsdc,
+          pnlPct,
           closeReason,
-          signalType: pos.signalType, confidence: pos.signalConfidence,
+          signalType: pos.signalType,
+          confidence: pos.signalConfidence,
         });
       }
 
       await sendTelegram(
         `${IS_PAPER ? "📝 [PAPER] " : ""}${emoji} *${coin} CLOSED (${closeReason})*\n` +
-        `Entry: $${pos.entryPx.toFixed(4)} → Exit: $${markPx.toFixed(4)}\n` +
-        `P&L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}% ($${pnlUsdc >= 0 ? "+" : ""}${pnlUsdc.toFixed(2)})\n` +
-        `Held: ${hoursHeld.toFixed(1)}h`
+          `Entry: $${pos.entryPx.toFixed(4)} → Exit: $${markPx.toFixed(4)}\n` +
+          `P&L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}% ($${pnlUsdc >= 0 ? "+" : ""}${pnlUsdc.toFixed(2)})\n` +
+          `Held: ${hoursHeld.toFixed(1)}h`,
       );
 
       delete positions[coin];
-      console.log(`${coin}: closed (${closeReason}) PnL: ${pnlPct.toFixed(1)}%`);
+      console.log(
+        `${coin}: closed (${closeReason}) PnL: ${pnlPct.toFixed(1)}%`,
+      );
     }
   }
 }
 
 // ─── Status command ──────────────────────────────────────────────────────────
 async function printStatus(
-  positions:  PositionStore,
+  positions: PositionStore,
   markPrices: Map<string, number>,
 ): Promise<void> {
-  console.log(`\nAltShortBot Executor — ${IS_PAPER ? "[PAPER MODE]" : "[LIVE]"}`);
+  console.log(
+    `\nAltShortBot Executor — ${IS_PAPER ? "[PAPER MODE]" : "[LIVE]"}`,
+  );
   console.log(`Open positions: ${Object.keys(positions).length}`);
 
   for (const [coin, pos] of Object.entries(positions)) {
     const markPx = markPrices.get(coin) ?? pos.entryPx;
-    const pnlPct = (pos.entryPx - markPx) / pos.entryPx * 100;
-    const hrs    = ((Date.now() - pos.openedAt) / 3_600_000).toFixed(1);
+    const pnlPct = ((pos.entryPx - markPx) / pos.entryPx) * 100;
+    const hrs = ((Date.now() - pos.openedAt) / 3_600_000).toFixed(1);
     console.log(
       `  ${coin.padEnd(10)} entry: $${pos.entryPx.toFixed(4)}` +
-      `  mark: $${markPx.toFixed(4)}` +
-      `  PnL: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}%` +
-      `  held: ${hrs}h  stop: $${pos.stopLossPx.toFixed(4)}`
+        `  mark: $${markPx.toFixed(4)}` +
+        `  PnL: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}%` +
+        `  held: ${hrs}h  stop: $${pos.stopLossPx.toFixed(4)}`,
     );
   }
 
   // Paper-mode P&L summary from the JSONL trade log.
   if (IS_PAPER && existsSync(PAPER_LOG_FILE)) {
     const trades: PaperTrade[] = readFileSync(PAPER_LOG_FILE, "utf8")
-      .trim().split("\n").filter(Boolean).map(l => JSON.parse(l));
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
     if (trades.length) {
       const totalPnl = trades.reduce((s, t) => s + t.pnlUsdc, 0);
-      const winRate  = trades.filter(t => t.pnlUsdc > 0).length / trades.length * 100;
+      const winRate =
+        (trades.filter((t) => t.pnlUsdc > 0).length / trades.length) * 100;
       console.log(
         `\nPaper trades: ${trades.length}` +
-        `  Win rate: ${winRate.toFixed(0)}%` +
-        `  Total PnL: $${totalPnl.toFixed(2)}`
+          `  Win rate: ${winRate.toFixed(0)}%` +
+          `  Total PnL: $${totalPnl.toFixed(2)}`,
       );
     }
   }
@@ -618,9 +728,11 @@ async function printStatus(
 
 // ─── Main loop ───────────────────────────────────────────────────────────────
 async function main(): Promise<void> {
-  console.log(`\nAltShortBot Executor — ${new Date().toISOString()} — ${IS_PAPER ? "PAPER" : "LIVE"}`);
+  console.log(
+    `\nAltShortBot Executor — ${new Date().toISOString()} — ${IS_PAPER ? "PAPER" : "LIVE"}`,
+  );
 
-  const positions  = loadPositions();
+  const positions = loadPositions();
   const markPrices = await fetchMarkPrices();
 
   if (IS_STATUS) {
@@ -649,25 +761,33 @@ async function main(): Promise<void> {
           err,
         );
         savePositions(positions);
-        return;  // exit WITHOUT clearing queue
+        return; // exit WITHOUT clearing queue
       }
     } else {
       // Paper mode: configured account size, default $10k.
       accountValue = parseFloat(process.env.HL_PAPER_ACCOUNT ?? "") || 10_000;
     }
 
-    clearQueue();  // clear ONLY after successful account fetch
+    clearQueue(); // clear ONLY after successful account fetch
     console.log(`Processing ${queue.length} queued signal(s)...`);
 
     for (const signal of queue) {
       // Skip stale signals (>2h old — price has likely moved too far).
       const ageH = (Date.now() - signal.queuedAt) / 3_600_000;
       if (ageH > 2) {
-        console.log(`${signal.coin}: signal stale (${ageH.toFixed(1)}h old) — skip`);
+        console.log(
+          `${signal.coin}: signal stale (${ageH.toFixed(1)}h old) — skip`,
+        );
         continue;
       }
-      await executeSignal(signal, assetIndex, markPrices, positions, accountValue);
-      await new Promise(r => setTimeout(r, 200));  // rate-limit buffer between orders
+      await executeSignal(
+        signal,
+        assetIndex,
+        markPrices,
+        positions,
+        accountValue,
+      );
+      await new Promise((r) => setTimeout(r, 200)); // rate-limit buffer between orders
     }
   }
 
@@ -675,7 +795,7 @@ async function main(): Promise<void> {
   console.log(`Done. Open positions: ${Object.keys(positions).length}`);
 }
 
-main().catch(async e => {
+main().catch(async (e) => {
   await alertError("executor crashed", e);
   process.exit(1);
 });

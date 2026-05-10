@@ -33,51 +33,51 @@
 module.exports = {
   apps: [
     {
-      name:   "altshortbot-scanner",
+      name: "altshortbot-scanner",
 
       // Run once and exit — PM2 restarts on cron schedule
       script: "npx",
-      args:   "tsx live_scanner.ts",
+      args: "tsx live_scanner.ts",
 
       // Hourly at :05 past (gives exchanges 5 min after settlement)
       cron_restart: "5 * * * *",
-      autorestart:  false,
+      autorestart: false,
 
-      out_file:   "logs/scanner.log",
+      out_file: "logs/scanner.log",
       error_file: "logs/scanner-error.log",
-      time:       true,
+      time: true,
 
       env: {
-        NODE_ENV:         "production",
-        TELEGRAM_TOKEN:   process.env.TELEGRAM_TOKEN    ?? "",
-        TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID  ?? "",
+        NODE_ENV: "production",
+        TELEGRAM_TOKEN: process.env.TELEGRAM_TOKEN ?? "",
+        TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID ?? "",
         // Optional: override watchlist (comma-separated)
         // SCANNER_COINS: "ORDI,KNC,HIVE,HYPER,ENJ",
       },
     },
     {
-      name:   "altshortbot-executor",
+      name: "altshortbot-executor",
 
       // Run once and exit — PM2 restarts on cron schedule.
       // ── KEEP `--paper` UNTIL YOU'VE VALIDATED 2-4 WEEKS OF PAPER P&L. ──
       script: "npx",
-      args:   "tsx hl_executor.ts --paper",
+      args: "tsx hl_executor.ts --paper",
 
       // Every 5 minutes
       cron_restart: "*/5 * * * *",
-      autorestart:  false,
+      autorestart: false,
 
-      out_file:   "logs/executor.log",
+      out_file: "logs/executor.log",
       error_file: "logs/executor-error.log",
-      time:       true,
+      time: true,
 
       env: {
-        NODE_ENV:          "production",
-        TELEGRAM_TOKEN:    process.env.TELEGRAM_TOKEN    ?? "",
-        TELEGRAM_CHAT_ID:  process.env.TELEGRAM_CHAT_ID  ?? "",
+        NODE_ENV: "production",
+        TELEGRAM_TOKEN: process.env.TELEGRAM_TOKEN ?? "",
+        TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID ?? "",
         HL_WALLET_ADDRESS: process.env.HL_WALLET_ADDRESS ?? "",
-        HL_AGENT_KEY:      process.env.HL_AGENT_KEY      ?? "",
-        HL_PAPER_ACCOUNT:  "10000",   // simulated account size for paper mode
+        HL_AGENT_KEY: process.env.HL_AGENT_KEY ?? "",
+        HL_PAPER_ACCOUNT: "10000", // simulated account size for paper mode
         // HL_TESTNET:     "1",        // uncomment to use testnet
       },
     },
