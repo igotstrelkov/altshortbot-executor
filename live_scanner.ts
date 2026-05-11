@@ -108,7 +108,7 @@ const PARAMS = {
   minOiChangePct: 2,
   maxPriceChangePct: 2,
   // Pump top
-  pumpMinPct: 25,
+  pumpMinPct: 19,
   pumpMinVolMult: 5,
   pumpMinRsi: 88,
   pumpMinFundingApr: 0,

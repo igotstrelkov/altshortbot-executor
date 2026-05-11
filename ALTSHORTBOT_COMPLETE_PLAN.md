@@ -37,7 +37,7 @@ const PARAMS = {
   minOiChangePct: 2, // OI growth % over 4h
   maxPriceChangePct: 2, // price must be flat
   // Pump top
-  pumpMinPct: 25,
+  pumpMinPct: 19,
   pumpMinVolMult: 5,
   pumpMinRsi: 88,
   pumpMinFundingApr: 0,
@@ -77,7 +77,7 @@ to re-run backtests when tuning:
 ```bash
 npx tsx backtest_signals.ts --coin ORDI --days 60 \
   --threshold 10 --min-positive 2 --min-oi 2 --max-price 2 \
-  --pump-pct 25 --pump-vol 5 --pump-rsi 88 --pump-funding 0 \
+  --pump-pct 19 --pump-vol 5 --pump-rsi 88 --pump-funding 0 \
   --squeeze-pct 20 --squeeze-hours 10 --squeeze-funding -100 --squeeze-oi-drop 0 \
   --exhaust-funding -20 --exhaust-oi-drop 3 --lookahead 48
 ```

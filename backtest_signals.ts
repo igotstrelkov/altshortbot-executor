@@ -12,9 +12,10 @@ import { writeFileSync } from "fs";
  *
  *   npx tsx backtest_signals.ts --coin ORDI --days 30 \
  *     --threshold 10 --min-positive 2 --min-oi 2 --max-price 2 \
- *     --pump-pct 25 --pump-vol 5 --pump-rsi 88 --pump-funding 0 \
+ *     --pump-pct 19 --pump-vol 5 --pump-rsi 88 --pump-funding 0 \
  *     --squeeze-pct 20 --squeeze-hours 10 --squeeze-funding -100 --squeeze-oi-drop 0 \
  *     --exhaust-funding -20 --exhaust-oi-drop 3 --lookahead 48 --chart
+ *     # (no --source needed — bybit is now the default)
  *
  * ── PARAMETER REFERENCE ─────────────────────────────────────────────────────
  *
@@ -80,6 +81,7 @@ import { writeFileSync } from "fs";
  */
 
 const BN_BASE = "https://fapi.binance.com";
+const BB_BASE = "https://api.bybit.com";
 const BN_DATA = "https://fapi.binance.com/futures/data";
 const HL_BASE = "https://api.hyperliquid.xyz";
 
@@ -91,7 +93,7 @@ interface Config {
   coins: string[];
   days: number;
   lookaheadHours: number;
-  dataSource: "bybit" | "hl";
+  dataSource: "bybit" | "binance" | "hl";
   fundingAprThreshold: number;
   minPositiveReadings: number;
   minOiChangePct: number;
@@ -363,6 +365,84 @@ async function fetchBybitOIHistory(
   }
 
   return records.sort((a, b) => a.timeMs - b.timeMs);
+}
+
+// ── Bybit candle fetcher ──────────────────────────────────────────────────────
+// Default data source. Fetches from Bybit so candles match exactly what the
+// live scanner sees in production. Bybit returns candles newest-first.
+async function fetchCandlesBybit(
+  coin: string,
+  startMs: number,
+  endMs: number,
+): Promise<Candle[]> {
+  const all: Candle[] = [];
+  let curEnd = endMs;
+
+  while (true) {
+    const url =
+      `${BB_BASE}/v5/market/kline?` +
+      new URLSearchParams({
+        category: "linear",
+        symbol: `${coin}USDT`,
+        interval: "60",
+        end: String(curEnd),
+        limit: "1000",
+      }).toString();
+
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status} from Bybit klines`);
+
+    const data = (await res.json()) as {
+      retCode: number;
+      result?: { list?: string[][] };
+    };
+
+    if (data.retCode !== 0 || !data.result?.list?.length) break;
+    const list = data.result.list;
+
+    // Reverse to chronological — oldest first
+    for (const r of [...list].reverse()) {
+      const t = parseInt(r[0]);
+      if (t < startMs) continue;
+      all.push({ t, o: +r[1], h: +r[2], l: +r[3], c: +r[4], v: +r[5] });
+    }
+
+    // Oldest candle in this batch — move window back
+    const oldestTs = parseInt(list[list.length - 1][0]);
+    if (oldestTs <= startMs || list.length < 1000) break;
+    curEnd = oldestTs - 1;
+    await sleep(80);
+  }
+
+  // Sort ascending and deduplicate
+  const seen = new Set<number>();
+  return all
+    .sort((a, b) => a.t - b.t)
+    .filter((c) => {
+      if (seen.has(c.t)) return false;
+      seen.add(c.t);
+      return true;
+    });
+}
+
+// ── Bybit coin universe ───────────────────────────────────────────────────────
+async function fetchAvailableBybit(): Promise<FuturesSymbol[]> {
+  const url =
+    `${BB_BASE}/v5/market/instruments-info?` +
+    new URLSearchParams({
+      category: "linear",
+      status: "Trading",
+      limit: "1000",
+    }).toString();
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status} from Bybit instruments`);
+  const data = (await res.json()) as {
+    result?: { list?: { symbol: string; quoteCoin: string }[] };
+  };
+  return (data.result?.list ?? [])
+    .filter((s) => s.quoteCoin === "USDT")
+    .map((s) => ({ symbol: s.symbol, coin: s.symbol.replace(/USDT$/, "") }))
+    .sort((a, b) => a.coin.localeCompare(b.coin));
 }
 
 // ── Hyperliquid data fetchers ─────────────────────────────────────────────────
@@ -863,7 +943,7 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
   } else {
     // Fetch live
     if (config.dataSource === "hl") {
-      // Hyperliquid data path — coin name without USDT suffix
+      // Hyperliquid — coin name without USDT suffix
       try {
         process.stdout.write(`  Fetching price data (Hyperliquid)...`);
         candles = await fetchCandlesHL(coin, fetchFrom, nowMs);
@@ -882,21 +962,39 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
       } catch (e: unknown) {
         console.log(` unavailable (${e instanceof Error ? e.message : e})`);
       }
-    } else {
-      // Bybit + Binance data path — coin name with USDT suffix
+    } else if (config.dataSource === "bybit") {
+      // Bybit only — matches live scanner exactly
       try {
-        process.stdout.write(`  Fetching price data...`);
+        process.stdout.write(`  Fetching price data (Bybit)...`);
+        candles = await fetchCandlesBybit(coin, fetchFrom, nowMs);
+        console.log(` ${candles.length} bars`);
+      } catch (e: unknown) {
+        console.log(
+          `\n  ❌ Bybit candle fetch failed: ${e instanceof Error ? e.message : e}`,
+        );
+        console.log(
+          `     Coin may not be listed on Bybit or was recently delisted.`,
+        );
+      }
+      try {
+        process.stdout.write(`  Fetching funding history (Bybit)...`);
+        bybitFunding = await fetchBybitFundingHistory(symbol, fetchFrom, nowMs);
+        console.log(` ${bybitFunding.length} records`);
+      } catch (e: unknown) {
+        console.log(` unavailable (${e instanceof Error ? e.message : e})`);
+      }
+    } else {
+      // Binance (legacy) — Binance candles + Bybit+Binance merged funding
+      try {
+        process.stdout.write(`  Fetching price data (Binance)...`);
         candles = await fetchKlines(symbol, fetchFrom, nowMs);
         console.log(` ${candles.length} bars`);
       } catch (e: unknown) {
         console.log(
-          `\n  ❌ Price (klines) fetch failed: ${e instanceof Error ? e.message : e}`,
+          `\n  ❌ Binance candle fetch failed: ${e instanceof Error ? e.message : e}`,
         );
-        console.log(
-          `     This coin may have been listed recently or delisted.`,
-        );
+        console.log(`     Coin may not be listed on Binance Futures.`);
       }
-
       try {
         process.stdout.write(`  Fetching funding history (Binance)...`);
         funding = await fetchFundingHistory(symbol, fetchFrom, nowMs);
@@ -906,8 +1004,6 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
           `\n  ❌ Binance funding fetch failed: ${e instanceof Error ? e.message : e}`,
         );
       }
-
-      // Also fetch Bybit funding — use whichever exchange had higher rate at each hour
       try {
         process.stdout.write(`  Fetching funding history (Bybit)...`);
         bybitFunding = await fetchBybitFundingHistory(symbol, fetchFrom, nowMs);
@@ -932,11 +1028,13 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
   let gate2Available = true;
   if (!config.useFixtures || !oi.length) {
     if (config.dataSource === "hl") {
-      // HL has no historical per-coin OI endpoint — Gate 2 disabled for HL source
+      // HL has no historical per-coin OI endpoint — Gate 2 disabled
       gate2Available = false;
       console.log(
         `  OI history: not available from Hyperliquid — Gate 2 (OI divergence) disabled`,
       );
+    } else if (config.dataSource === "bybit") {
+      // Bybit OI only — no Binance fallback needed
     } else {
       // Only fetch OI if we didn't load it from a fixture
       try {
@@ -996,7 +1094,7 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
 
   // Build per-hour funding map
   let rawFundingByHour: Record<number, number> = {};
-  if (config.dataSource === "hl") {
+  if (config.dataSource === "hl" || config.dataSource === "bybit") {
     // HL: single source, already per-hour, just forward-fill
     const sorted = [...bybitFunding].sort((a, b) => a.timeMs - b.timeMs);
     let last = 0,
@@ -2416,7 +2514,7 @@ interface Args {
   coins: string[];
   days: number;
   lookaheadHours: number;
-  dataSource: "bybit" | "hl";
+  dataSource: "bybit" | "binance" | "hl";
   fundingAprThreshold: number;
   minPositiveReadings: number;
   minOiChangePct: number;
@@ -2462,9 +2560,9 @@ function parseArgs(): Args {
     minPositiveReadings: parseInt(g("--min-positive", "6"), 10),
     minOiChangePct: parseFloat(g("--min-oi", "5")),
     maxPriceChangePct: parseFloat(g("--max-price", "0.5")),
-    pumpMinPct: parseFloat(g("--pump-pct", "20")),
+    pumpMinPct: parseFloat(g("--pump-pct", "19")),
     pumpMinVolMult: parseFloat(g("--pump-vol", "8")),
-    pumpMinRsi: parseFloat(g("--pump-rsi", "80")),
+    pumpMinRsi: parseFloat(g("--pump-rsi", "88")),
     pumpMinFundingApr: parseFloat(g("--pump-funding", "50")),
     squeezeMinPct: parseFloat(g("--squeeze-pct", "20")),
     squeezeHours: parseInt(g("--squeeze-hours", "6"), 10),
@@ -2472,7 +2570,7 @@ function parseArgs(): Args {
     exhaustMaxFundingApr: parseFloat(g("--exhaust-funding", "-20")),
     exhaustMinOiDrop: parseFloat(g("--exhaust-oi-drop", "0")),
     squeezeMinOiDrop: parseFloat(g("--squeeze-oi-drop", "3")),
-    dataSource: g("--source", "bybit") as "bybit" | "hl",
+    dataSource: g("--source", "bybit") as "bybit" | "binance" | "hl",
     trendFilter: !a.includes("--no-trend-filter"),
     trendDays7Pct: parseFloat(g("--trend-7d", "30")),
     trendDays14Pct: parseFloat(g("--trend-14d", "50")),
@@ -2565,7 +2663,12 @@ async function main(): Promise<void> {
   // Fetch the full universe once upfront for validation and suggestions
   let universe: FuturesSymbol[] = [];
   try {
-    universe = await fetchAvailableCoins();
+    universe =
+      args.dataSource === "bybit"
+        ? await fetchAvailableBybit()
+        : args.dataSource === "hl"
+          ? [] // HL universe not validated here
+          : await fetchAvailableCoins();
   } catch {
     // Non-fatal — continue without validation
   }
@@ -2574,7 +2677,8 @@ async function main(): Promise<void> {
   // Warn about any coins not listed before spending time fetching their data
   for (const coin of args.coins) {
     if (universe.length && !availableSet.has(coin)) {
-      console.log(`\n⚠️  ${coin}USDT is not listed on Binance Futures.`);
+      const src = args.dataSource === "bybit" ? "Bybit" : "Binance Futures";
+      console.log(`\n⚠️  ${coin}USDT is not listed on ${src}.`);
       const similar = findSimilar(coin, universe);
       if (similar.length) {
         console.log(`   Similar coins available: ${similar.join(", ")}`);

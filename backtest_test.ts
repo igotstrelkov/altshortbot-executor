@@ -9,9 +9,10 @@
  *   npx tsx backtest_test.ts --update  — re-generate expected fixtures from live data
  *
  * Parameter notes:
- *   --exhaust-oi-drop is omitted — Bybit OI covers only 200h (~8 days);
- *     test signals span 30 days so older signals have no OI data and would all fail.
- *     Validated separately: NOT coin backtest shows OI filter blocks flat-OI signals.
+ *   --source binance is explicit — fixtures were captured on Binance candle data.
+ *     To migrate to Bybit (new default), delete fixtures/ and re-run to re-capture.
+ *   --exhaust-oi-drop is omitted — Bybit OI covers only 200h (~8 days); test signals
+ *     span 30 days so older signals have no OI data. Validated via NOT coin backtest.
  *   --pump-squeeze-funding is omitted — diagnostic only, not traded in live scanner.
  */
 
@@ -107,6 +108,8 @@ const TESTS: TestCase[] = [
       "10",
       "--squeeze-funding",
       "-100",
+      "--source",
+      "binance", // fixtures captured on Binance — re-capture with Bybit to switch
       "--squeeze-oi-drop",
       "0",
       // NOTE: --exhaust-oi-drop intentionally omitted.
@@ -164,6 +167,8 @@ const TESTS: TestCase[] = [
       "10",
       "--squeeze-funding",
       "-100",
+      "--source",
+      "binance", // fixtures captured on Binance — re-capture with Bybit to switch
       "--squeeze-oi-drop",
       "0",
       // NOTE: --exhaust-oi-drop intentionally omitted.
@@ -216,6 +221,8 @@ const TESTS: TestCase[] = [
       "10",
       "--squeeze-funding",
       "-100",
+      "--source",
+      "binance", // fixtures captured on Binance — re-capture with Bybit to switch
       "--squeeze-oi-drop",
       "0",
       // NOTE: --exhaust-oi-drop intentionally omitted.
@@ -278,6 +285,8 @@ const TESTS: TestCase[] = [
       "10",
       "--squeeze-funding",
       "-100",
+      "--source",
+      "binance", // fixtures captured on Binance — re-capture with Bybit to switch
       "--squeeze-oi-drop",
       "0",
       // NOTE: --exhaust-oi-drop intentionally omitted.
@@ -322,6 +331,8 @@ const TESTS: TestCase[] = [
       "10",
       "--squeeze-funding",
       "-100",
+      "--source",
+      "binance", // fixtures captured on Binance — re-capture with Bybit to switch
       "--squeeze-oi-drop",
       "0",
       // NOTE: --exhaust-oi-drop intentionally omitted.
@@ -378,6 +389,8 @@ const TESTS: TestCase[] = [
       "10",
       "--squeeze-funding",
       "-100",
+      "--source",
+      "binance", // fixtures captured on Binance — re-capture with Bybit to switch
       "--squeeze-oi-drop",
       "0",
       // NOTE: --exhaust-oi-drop intentionally omitted.
@@ -422,6 +435,8 @@ const TESTS: TestCase[] = [
       "10",
       "--squeeze-funding",
       "-100",
+      "--source",
+      "binance", // fixtures captured on Binance — re-capture with Bybit to switch
       "--squeeze-oi-drop",
       "0",
       // NOTE: --exhaust-oi-drop intentionally omitted.
