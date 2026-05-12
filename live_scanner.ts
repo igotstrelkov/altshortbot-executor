@@ -95,6 +95,9 @@ async function fetchAllCoins(): Promise<string[]> {
 // ─── Module-level constants ───────────────────────────────────────────────────
 const HOUR = 3_600_000;
 const FUNDING_COOLDOWN_MS = 8 * HOUR; // Gate 1 re-fires once per settlement cycle
+// Re-fire BUILDING when funding becomes 2× more extreme than when it first fired.
+// E.g.: first fire at -300% APR → re-fire when funding reaches -600% APR.
+const BUILDING_REFIRE_MULTIPLIER = 2.0;
 const MIN_EXHAUSTION_GAP_H = 6; // Exhaustion re-fire minimum gap (hours)
 const STATE_FILE = "scanner_state.json";
 const BB_BASE = "https://api.bybit.com";
@@ -153,6 +156,7 @@ interface CoinState {
   lastSqueezePhase: "BUILDING" | "EXHAUSTION" | "TREND_BREAK" | null;
   // Per-wave fired flags
   waveAlertedBuilding: boolean; // BUILDING fires once per wave
+  lastBuildingFundingApr: number; // funding APR when last BUILDING fired — used for re-fire
   waveAlertedTrendBreak: boolean; // TREND_BREAK fires once per trending episode
   // Exhaustion: timestamp-based (6h minimum gap) — allows re-fire after early bad signal
   lastExhaustionMs: number | null;
@@ -198,6 +202,7 @@ function defaultState(): CoinState {
     lastBuildingMinFunding: 0,
     lastSqueezePhase: null,
     waveAlertedBuilding: false,
+    lastBuildingFundingApr: 0,
     waveAlertedTrendBreak: false,
     lastExhaustionMs: null,
     lastFundingAlertMs: null,
@@ -295,6 +300,71 @@ async function fetchFundingBybit(coin: string): Promise<FundingRecord[]> {
       ratePerHour: parseFloat(r.fundingRate) / intervalHours,
     }))
     .reverse();
+}
+
+// ── Binance funding (supplementary source) ───────────────────────────────────
+// Fetches Binance funding history for the last ~200 settlement periods.
+// Used alongside Bybit to capture squeeze dynamics visible on either exchange.
+const BN_BASE = "https://fapi.binance.com";
+
+async function fetchFundingBinance(coin: string): Promise<FundingRecord[]> {
+  try {
+    const url = `${BN_BASE}/fapi/v1/fundingRate?symbol=${coin}USDT&limit=200`;
+    const raw = (await fetchJSON(url)) as {
+      fundingTime: number;
+      fundingRate: string;
+    }[];
+    // Binance settles every 8h — divide by 8 for per-hour rate
+    return raw.map((r) => ({
+      timeMs: r.fundingTime,
+      ratePerHour: parseFloat(r.fundingRate) / 8,
+    }));
+  } catch {
+    return []; // non-fatal — Bybit funding still used
+  }
+}
+
+// ── Merged funding by hour ────────────────────────────────────────────────────
+// Combines Bybit and Binance funding, taking the most extreme rate per hour.
+// Captures squeeze signals visible on either exchange (e.g. HYPER/SPK show
+// more extreme negative funding on Binance than Bybit).
+function buildMergedFundingByHour(
+  bybit: FundingRecord[],
+  binance: FundingRecord[],
+): Record<number, number> {
+  // Build forward-filled maps for each source
+  function forwardFill(records: FundingRecord[]): Record<number, number> {
+    const sorted = [...records].sort((a, b) => a.timeMs - b.timeMs);
+    if (!sorted.length) return {};
+    const out: Record<number, number> = {};
+    let last = 0,
+      rIdx = 0;
+    const startTs = floorH(sorted[0].timeMs);
+    const endTs = floorH(Date.now()) + HOUR;
+    for (let ts = startTs; ts <= endTs; ts += HOUR) {
+      while (rIdx < sorted.length && floorH(sorted[rIdx].timeMs) <= ts) {
+        last = sorted[rIdx].ratePerHour;
+        rIdx++;
+      }
+      out[ts] = last;
+    }
+    return out;
+  }
+
+  const bbMap = forwardFill(bybit);
+  const bnMap = forwardFill(binance);
+
+  // Union of all timestamps — take most extreme (highest absolute) per hour
+  const allTs = Array.from(
+    new Set([...Object.keys(bbMap), ...Object.keys(bnMap)].map(Number)),
+  );
+  const merged: Record<number, number> = {};
+  for (const ts of allTs) {
+    const bb = bbMap[ts] ?? 0;
+    const bn = bnMap[ts] ?? 0;
+    merged[ts] = Math.abs(bb) >= Math.abs(bn) ? bb : bn;
+  }
+  return merged;
 }
 
 async function fetchOIHistory(
@@ -633,16 +703,29 @@ function scanCoin(
           ? (ts - newState.lastExhaustionMs) / HOUR
           : Infinity;
 
+      // BUILDING re-fire: allow if funding is 2× more extreme than when it last fired
+      const buildingRefireEligible =
+        phase === "BUILDING" &&
+        newState.waveAlertedBuilding &&
+        newState.lastBuildingFundingApr < 0 &&
+        sq.fundingApr <
+          newState.lastBuildingFundingApr * BUILDING_REFIRE_MULTIPLIER;
+
       const alreadyFired =
-        (phase === "BUILDING" && newState.waveAlertedBuilding) ||
+        (phase === "BUILDING" &&
+          newState.waveAlertedBuilding &&
+          !buildingRefireEligible) ||
         (phase === "EXHAUSTION" &&
           hoursSinceExhaustion < MIN_EXHAUSTION_GAP_H) ||
         (phase === "TREND_BREAK" && newState.waveAlertedTrendBreak);
 
       if (!alreadyFired) {
+        const isRefire = phase === "BUILDING" && newState.waveAlertedBuilding;
         const details =
           phase === "BUILDING"
-            ? `Squeeze: +${sq.cumulativePct.toFixed(1)}% over ${PARAMS.squeezeHours}h | Funding: ${fundingApr.toFixed(0)}% APR`
+            ? isRefire
+              ? `Squeeze: +${sq.cumulativePct.toFixed(1)}% over ${PARAMS.squeezeHours}h | Funding: ${fundingApr.toFixed(0)}% APR (intensified from ${newState.lastBuildingFundingApr.toFixed(0)}%)`
+              : `Squeeze: +${sq.cumulativePct.toFixed(1)}% over ${PARAMS.squeezeHours}h | Funding: ${fundingApr.toFixed(0)}% APR`
             : phase === "EXHAUSTION"
               ? `Squeeze: +${sq.cumulativePct.toFixed(1)}% over ${PARAMS.squeezeHours}h | Funding: ${fundingApr.toFixed(1)}% APR`
               : /* TREND_BREAK */ `Squeeze: +${sq.cumulativePct.toFixed(1)}% over ${PARAMS.squeezeHours}h | Prior funding: ${newState.lastBuildingMinFunding.toFixed(0)}% APR`;
@@ -662,6 +745,7 @@ function scanCoin(
         if (phase === "BUILDING") {
           newState.waveAlertedBuilding = true;
           newState.lastBuildingSignalMs = ts;
+          newState.lastBuildingFundingApr = sq.fundingApr;
         }
         if (phase === "EXHAUSTION") {
           newState.lastExhaustionMs = ts;
@@ -678,6 +762,7 @@ function scanCoin(
     newState.squeezeWaveHighPrice = 0;
     newState.waveAlertedBuilding = false;
     newState.lastExhaustionMs = null;
+    newState.lastBuildingFundingApr = 0;
     if (newState.lastSqueezePhase === "BUILDING")
       newState.lastSqueezePhase = null;
   }
@@ -726,8 +811,16 @@ function formatAlert(alert: Alert): string {
 
   if (alert.type === "EXHAUSTION" && alert.confidence === "HIGH")
     lines.push("", `📐 Short entry — stop at -12% | target -15% to -40%`);
-  if (alert.type === "BUILDING")
-    lines.push("", `⏳ Do NOT short yet — await exhaustion signal`);
+  if (alert.type === "BUILDING") {
+    // BUILDING is auto-traded when funding ≤ -200% APR (validated profitable
+    // regime: 9/9 winners). Above that threshold it's informational only —
+    // mega-squeezes have run another 80%+ before reversing.
+    if (alert.fundingApr <= -200) {
+      lines.push("", `📐 Short entry — extreme funding squeeze (auto-queued)`);
+    } else {
+      lines.push("", `⏳ Do NOT short yet — await exhaustion signal`);
+    }
+  }
   if (alert.type === "TREND_BREAK")
     lines.push("", `📐 Strong short — parabolic blow-off confirmed`);
 
@@ -787,9 +880,10 @@ async function main(): Promise<void> {
   for (const coin of coins) {
     process.stdout.write(`  ${coin}... `);
     try {
-      const [candles, bbFunding] = await Promise.all([
+      const [candles, bbFunding, bnFunding] = await Promise.all([
         fetchCandles(coin, 500),
         fetchFundingBybit(coin),
+        fetchFundingBinance(coin), // non-fatal — returns [] on error
       ]);
 
       if (candles.length < 50) {
@@ -798,7 +892,7 @@ async function main(): Promise<void> {
       }
 
       const oiHistory = await fetchOIHistory(coin, candles);
-      const fundingByHour = buildFundingByHour(bbFunding);
+      const fundingByHour = buildMergedFundingByHour(bbFunding, bnFunding);
       const coinState = state[coin] ?? defaultState();
 
       const { alerts, newState } = scanCoin(
@@ -836,16 +930,26 @@ async function main(): Promise<void> {
       await sleep(500); // Telegram rate limit
     }
 
-    // Queue HIGH/MEDIUM EXHAUSTION & TREND_BREAK for the executor.
+    // Queue tradeable signals for the executor.
+    //   • HIGH/MEDIUM EXHAUSTION & TREND_BREAK — the original tradeable set.
+    //   • BUILDING with fundingApr ≤ -200% APR — validated profitable: 9/9
+    //     paper-observed winners over 10d (avg +11% at 1×, ~+33% at 3×).
+    //     Above -200% (e.g. -100%) entered mega-squeezes where price ran
+    //     80%+ higher before reversing, so they're excluded.
     // LOW confidence stays Telegram-only — too risky for auto-execution.
     // DRY_RUN suppresses queue writes so a hand-triggered scan can't bleed into
     // the executor's pickup. Telegram still fires (above) for observability.
-    if (
-      !DRY_RUN &&
-      (alert.type === "EXHAUSTION" || alert.type === "TREND_BREAK") &&
-      (alert.confidence === "HIGH" || alert.confidence === "MEDIUM")
-    ) {
-      appendToQueue(alert);
+    if (!DRY_RUN) {
+      const isExhaustionOrBreak =
+        (alert.type === "EXHAUSTION" || alert.type === "TREND_BREAK") &&
+        (alert.confidence === "HIGH" || alert.confidence === "MEDIUM");
+
+      const isExtremeBuilding =
+        alert.type === "BUILDING" && alert.fundingApr <= -200;
+
+      if (isExhaustionOrBreak || isExtremeBuilding) {
+        appendToQueue(alert);
+      }
     }
 
     if (alert.type === "BUILDING") {

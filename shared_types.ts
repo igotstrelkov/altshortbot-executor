@@ -23,7 +23,7 @@ export interface PositionRecord {
   stopLossPx: number;
   targetPx: number;
   trailingActive: boolean;
-  signalType: "EXHAUSTION" | "TREND_BREAK";
+  signalType: "EXHAUSTION" | "TREND_BREAK" | "BUILDING";
   signalConfidence: "HIGH" | "MEDIUM";
   stopOid?: number;
   isPaper: boolean;

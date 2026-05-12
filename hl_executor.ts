@@ -53,7 +53,7 @@ const RISK = {
 } as const;
 
 // These signals are traded. Others are Telegram-only.
-const TRADEABLE = new Set(["EXHAUSTION", "TREND_BREAK"]);
+const TRADEABLE = new Set(["EXHAUSTION", "TREND_BREAK", "BUILDING"]);
 
 // ─── State persistence ────────────────────────────────────────────────────────
 function loadQueue(): QueuedSignal[] {
@@ -510,7 +510,7 @@ async function executeSignal(
     stopLossPx,
     targetPx,
     trailingActive: false,
-    signalType: type as "EXHAUSTION" | "TREND_BREAK",
+    signalType: type as "EXHAUSTION" | "TREND_BREAK" | "BUILDING",
     signalConfidence: confidence as "HIGH" | "MEDIUM",
     stopOid,
     isPaper: IS_PAPER,

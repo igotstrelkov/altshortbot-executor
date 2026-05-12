@@ -963,7 +963,7 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
         console.log(` unavailable (${e instanceof Error ? e.message : e})`);
       }
     } else if (config.dataSource === "bybit") {
-      // Bybit only — matches live scanner exactly
+      // Bybit candles + merged Bybit/Binance funding (best of both sources)
       try {
         process.stdout.write(`  Fetching price data (Bybit)...`);
         candles = await fetchCandlesBybit(coin, fetchFrom, nowMs);
@@ -980,6 +980,14 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
         process.stdout.write(`  Fetching funding history (Bybit)...`);
         bybitFunding = await fetchBybitFundingHistory(symbol, fetchFrom, nowMs);
         console.log(` ${bybitFunding.length} records`);
+      } catch (e: unknown) {
+        console.log(` unavailable (${e instanceof Error ? e.message : e})`);
+      }
+      // Also fetch Binance funding — merge both, use most extreme per hour
+      try {
+        process.stdout.write(`  Fetching funding history (Binance)...`);
+        funding = await fetchFundingHistory(symbol, fetchFrom, nowMs);
+        console.log(` ${funding.length} records`);
       } catch (e: unknown) {
         console.log(` unavailable (${e instanceof Error ? e.message : e})`);
       }
@@ -1034,7 +1042,23 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
         `  OI history: not available from Hyperliquid — Gate 2 (OI divergence) disabled`,
       );
     } else if (config.dataSource === "bybit") {
-      // Bybit OI only — no Binance fallback needed
+      // Bybit OI — fetch directly
+      try {
+        process.stdout.write(`  Fetching OI history (Bybit)...`);
+        const raw = await fetchBybitOIHistory(symbol, oiFetchFrom, nowMs);
+        oi = applyPriceToBybitOI(raw, priceByHour);
+        if (oi.length) {
+          console.log(` ${oi.length} records`);
+        } else {
+          gate2Available = false;
+          console.log(` unavailable — Gate 2 disabled`);
+        }
+      } catch (e: unknown) {
+        gate2Available = false;
+        console.log(
+          ` unavailable (${e instanceof Error ? e.message : e}) — Gate 2 disabled`,
+        );
+      }
     } else {
       // Only fetch OI if we didn't load it from a fixture
       try {
@@ -1065,7 +1089,8 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
   if (!candles.length) {
     console.log(`  ⚠️  No price data returned for ${coin}. Try --days 30.`);
   }
-  if (!funding.length) {
+  // Warn only when BOTH sources are empty — in Bybit mode Binance is never fetched
+  if (!funding.length && !bybitFunding.length) {
     console.log(`  ⚠️  No funding history returned for ${coin}.`);
   }
 
@@ -1094,8 +1119,8 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
 
   // Build per-hour funding map
   let rawFundingByHour: Record<number, number> = {};
-  if (config.dataSource === "hl" || config.dataSource === "bybit") {
-    // HL: single source, already per-hour, just forward-fill
+  if (config.dataSource === "hl") {
+    // HL: single source, forward-fill
     const sorted = [...bybitFunding].sort((a, b) => a.timeMs - b.timeMs);
     let last = 0,
       rIdx = 0;
@@ -1107,10 +1132,10 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
       rawFundingByHour[ts] = last;
     }
     console.log(
-      `  Funding source: Hyperliquid (${bybitFunding.length} 1h settlements, forward-filled)`,
+      `  Funding source: ${config.dataSource === "hl" ? "Hyperliquid" : "Bybit"} (${bybitFunding.length} 1h settlements, forward-filled)`,
     );
   } else {
-    // Bybit + Binance: merge using highest absolute rate per hour
+    // bybit + binance modes: merge both, take most extreme per hour
     const { merged, source: fundingSource } = mergeToHighestFunding(
       funding,
       bybitFunding,
@@ -1123,11 +1148,13 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
       (s) => s === "bybit",
     ).length;
     const totalSlots = Object.keys(fundingSource).length;
-    if (bybitFunding.length && totalSlots > 0) {
+    if (totalSlots > 0) {
       const bybitPct = Math.round((bybitSlots / totalSlots) * 100);
-      console.log(
-        `  Funding source: Bybit higher in ${bybitPct}% of hours, Binance in ${100 - bybitPct}%`,
-      );
+      const label =
+        config.dataSource === "bybit"
+          ? `Bybit+Binance merged — Bybit higher in ${bybitPct}% of hours`
+          : `Bybit higher in ${bybitPct}% of hours, Binance in ${100 - bybitPct}%`;
+      console.log(`  Funding source: ${label}`);
     }
   }
 
