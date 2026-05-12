@@ -98,6 +98,11 @@ const FUNDING_COOLDOWN_MS = 8 * HOUR; // Gate 1 re-fires once per settlement cyc
 // Re-fire BUILDING when funding becomes 2× more extreme than when it first fired.
 // E.g.: first fire at -300% APR → re-fire when funding reaches -600% APR.
 const BUILDING_REFIRE_MULTIPLIER = 2.0;
+// Block BUILDING queue entry if OI increased >50% in squeeze window.
+// Negative oiDropPct means OI rose — squeeze still actively building.
+// Evidence: SOLV May-12 oiDropPct=-182.9% → SQUEEZED; flat OI (0%) → profitable.
+// Start conservative at -50%; tune after 4+ weeks of signal data.
+const BUILDING_OI_RISING_MAX = -50;
 const MIN_EXHAUSTION_GAP_H = 6; // Exhaustion re-fire minimum gap (hours)
 const STATE_FILE = "scanner_state.json";
 const BB_BASE = "https://api.bybit.com";
@@ -724,8 +729,8 @@ function scanCoin(
         const details =
           phase === "BUILDING"
             ? isRefire
-              ? `Squeeze: +${sq.cumulativePct.toFixed(1)}% over ${PARAMS.squeezeHours}h | Funding: ${fundingApr.toFixed(0)}% APR (intensified from ${newState.lastBuildingFundingApr.toFixed(0)}%)`
-              : `Squeeze: +${sq.cumulativePct.toFixed(1)}% over ${PARAMS.squeezeHours}h | Funding: ${fundingApr.toFixed(0)}% APR`
+              ? `Squeeze: +${sq.cumulativePct.toFixed(1)}% over ${PARAMS.squeezeHours}h | Funding: ${fundingApr.toFixed(0)}% APR (intensified from ${newState.lastBuildingFundingApr.toFixed(0)}%) | OI: ${sq.oiDropPct.toFixed(1)}%`
+              : `Squeeze: +${sq.cumulativePct.toFixed(1)}% over ${PARAMS.squeezeHours}h | Funding: ${fundingApr.toFixed(0)}% APR | OI: ${sq.oiDropPct.toFixed(1)}%`
             : phase === "EXHAUSTION"
               ? `Squeeze: +${sq.cumulativePct.toFixed(1)}% over ${PARAMS.squeezeHours}h | Funding: ${fundingApr.toFixed(1)}% APR`
               : /* TREND_BREAK */ `Squeeze: +${sq.cumulativePct.toFixed(1)}% over ${PARAMS.squeezeHours}h | Prior funding: ${newState.lastBuildingMinFunding.toFixed(0)}% APR`;
@@ -740,6 +745,7 @@ function scanCoin(
           details,
           confidence,
           msSinceBuilding,
+          oiDropPct: sq.oiDropPct, // +ve=OI dropped, -ve=OI rose
         });
 
         if (phase === "BUILDING") {
@@ -812,11 +818,14 @@ function formatAlert(alert: Alert): string {
   if (alert.type === "EXHAUSTION" && alert.confidence === "HIGH")
     lines.push("", `📐 Short entry — stop at -12% | target -15% to -40%`);
   if (alert.type === "BUILDING") {
-    // BUILDING is auto-traded when funding ≤ -200% APR (validated profitable
-    // regime: 9/9 winners). Above that threshold it's informational only —
-    // mega-squeezes have run another 80%+ before reversing.
-    if (alert.fundingApr <= -200) {
+    const oiRising = (alert.oiDropPct ?? 0) < BUILDING_OI_RISING_MAX;
+    if (alert.fundingApr <= -200 && !oiRising) {
       lines.push("", `📐 Short entry — extreme funding squeeze (auto-queued)`);
+    } else if (alert.fundingApr <= -200 && oiRising) {
+      lines.push(
+        "",
+        `⚠️ Extreme funding but OI rising — squeeze still building (not queued)`,
+      );
     } else {
       lines.push("", `⏳ Do NOT short yet — await exhaustion signal`);
     }
@@ -945,7 +954,10 @@ async function main(): Promise<void> {
         (alert.confidence === "HIGH" || alert.confidence === "MEDIUM");
 
       const isExtremeBuilding =
-        alert.type === "BUILDING" && alert.fundingApr <= -200;
+        alert.type === "BUILDING" &&
+        alert.fundingApr <= -200 &&
+        // Skip if OI is rising strongly — squeeze still building, not near top
+        (alert.oiDropPct ?? 0) >= BUILDING_OI_RISING_MAX;
 
       if (isExhaustionOrBreak || isExtremeBuilding) {
         appendToQueue(alert);

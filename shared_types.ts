@@ -8,6 +8,7 @@ export interface Alert {
   details: string;
   confidence: "HIGH" | "MEDIUM" | "LOW";
   msSinceBuilding: number | null;
+  oiDropPct?: number; // +ve = OI dropped, -ve = OI rose (squeeze still building)
 }
 
 export interface QueuedSignal extends Alert {
