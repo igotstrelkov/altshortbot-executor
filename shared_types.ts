@@ -9,6 +9,7 @@ export interface Alert {
   confidence: "HIGH" | "MEDIUM" | "LOW";
   msSinceBuilding: number | null;
   oiDropPct?: number; // +ve = OI dropped, -ve = OI rose (squeeze still building)
+  recentPumpTop?: boolean; // PUMP_TOP fired within last 12h — squeeze still accelerating
 }
 
 export interface QueuedSignal extends Alert {

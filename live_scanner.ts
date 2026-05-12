@@ -98,11 +98,23 @@ const FUNDING_COOLDOWN_MS = 8 * HOUR; // Gate 1 re-fires once per settlement cyc
 // Re-fire BUILDING when funding becomes 2× more extreme than when it first fired.
 // E.g.: first fire at -300% APR → re-fire when funding reaches -600% APR.
 const BUILDING_REFIRE_MULTIPLIER = 2.0;
+// Block BUILDING queue entry if a PUMP_TOP fired within this window.
+// When a pump-top fires the squeeze is at peak violence — any BUILDING
+// in the following hours is entering a still-accelerating move.
+// Disabled (set to 0): only one data point (ENJ Apr 8) supported a 12h window,
+// but it also blocked XION (+9.30%) and 1000XEC (+13.79%) which were winners.
+// Re-enable with a calibrated value once more pump-top-then-building cases accumulate.
+export const PUMP_TOP_COOLDOWN_H = 0;
 // Block BUILDING queue entry if OI increased >50% in squeeze window.
 // Negative oiDropPct means OI rose — squeeze still actively building.
 // Evidence: SOLV May-12 oiDropPct=-182.9% → SQUEEZED; flat OI (0%) → profitable.
-// Start conservative at -50%; tune after 4+ weeks of signal data.
-const BUILDING_OI_RISING_MAX = -50;
+// Calibrated to -150% based on live signal data:
+//   SOLAYER (-103.7% OI) passed and won +16.86% → threshold must be < -103.7%
+//   SOLV    (-182.9% OI) blocked correctly       → threshold must be > -182.9%
+//   -150% sits cleanly between both data points.
+export const OI_RISING_MAX = -150;
+// ── Gate thresholds (mirror live_scanner.ts constants) ────────────────────────
+export const FUNDING_THRESHOLD = -200; // fundingApr must be ≤ this
 const MIN_EXHAUSTION_GAP_H = 6; // Exhaustion re-fire minimum gap (hours)
 const STATE_FILE = "scanner_state.json";
 const BB_BASE = "https://api.bybit.com";
@@ -160,7 +172,8 @@ interface CoinState {
   lastBuildingMinFunding: number; // persists across wave resets — needed for TREND_BREAK
   lastSqueezePhase: "BUILDING" | "EXHAUSTION" | "TREND_BREAK" | null;
   // Per-wave fired flags
-  waveAlertedBuilding: boolean; // BUILDING fires once per wave
+  waveAlertedBuilding: boolean; // BUILDING fires once per wave (or re-fires if funding becomes 2× more extreme)
+  lastPumpTopMs: number | null; // when last PUMP_TOP fired — gates BUILDING queue entry
   lastBuildingFundingApr: number; // funding APR when last BUILDING fired — used for re-fire
   waveAlertedTrendBreak: boolean; // TREND_BREAK fires once per trending episode
   // Exhaustion: timestamp-based (6h minimum gap) — allows re-fire after early bad signal
@@ -208,6 +221,7 @@ function defaultState(): CoinState {
     lastSqueezePhase: null,
     waveAlertedBuilding: false,
     lastBuildingFundingApr: 0,
+    lastPumpTopMs: null,
     waveAlertedTrendBreak: false,
     lastExhaustionMs: null,
     lastFundingAlertMs: null,
@@ -648,6 +662,7 @@ function scanCoin(
   // ── Pump top ──────────────────────────────────────────────────────────────
   const pump = detectPumpTop(candles, fRate);
   if (pump.triggered) {
+    newState.lastPumpTopMs = ts; // gate subsequent BUILDING signals
     alerts.push({
       coin,
       type: "PUMP_TOP",
@@ -735,6 +750,11 @@ function scanCoin(
               ? `Squeeze: +${sq.cumulativePct.toFixed(1)}% over ${PARAMS.squeezeHours}h | Funding: ${fundingApr.toFixed(1)}% APR`
               : /* TREND_BREAK */ `Squeeze: +${sq.cumulativePct.toFixed(1)}% over ${PARAMS.squeezeHours}h | Prior funding: ${newState.lastBuildingMinFunding.toFixed(0)}% APR`;
 
+        const recentPumpTop =
+          phase === "BUILDING" &&
+          newState.lastPumpTopMs !== null &&
+          ts - newState.lastPumpTopMs < PUMP_TOP_COOLDOWN_H * HOUR;
+
         alerts.push({
           coin,
           type: phase,
@@ -745,7 +765,8 @@ function scanCoin(
           details,
           confidence,
           msSinceBuilding,
-          oiDropPct: sq.oiDropPct, // +ve=OI dropped, -ve=OI rose
+          oiDropPct: sq.oiDropPct,
+          recentPumpTop: recentPumpTop || undefined,
         });
 
         if (phase === "BUILDING") {
@@ -818,10 +839,16 @@ function formatAlert(alert: Alert): string {
   if (alert.type === "EXHAUSTION" && alert.confidence === "HIGH")
     lines.push("", `📐 Short entry — stop at -12% | target -15% to -40%`);
   if (alert.type === "BUILDING") {
-    const oiRising = (alert.oiDropPct ?? 0) < BUILDING_OI_RISING_MAX;
-    if (alert.fundingApr <= -200 && !oiRising) {
+    const oiRising = (alert.oiDropPct ?? 0) < OI_RISING_MAX;
+    const pumpCooldown = alert.recentPumpTop === true;
+    if (alert.fundingApr <= FUNDING_THRESHOLD && !oiRising && !pumpCooldown) {
       lines.push("", `📐 Short entry — extreme funding squeeze (auto-queued)`);
-    } else if (alert.fundingApr <= -200 && oiRising) {
+    } else if (alert.fundingApr <= FUNDING_THRESHOLD && pumpCooldown) {
+      lines.push(
+        "",
+        `⚠️ Pump top fired recently — squeeze still accelerating (not queued)`,
+      );
+    } else if (alert.fundingApr <= FUNDING_THRESHOLD && oiRising) {
       lines.push(
         "",
         `⚠️ Extreme funding but OI rising — squeeze still building (not queued)`,
@@ -941,9 +968,9 @@ async function main(): Promise<void> {
 
     // Queue tradeable signals for the executor.
     //   • HIGH/MEDIUM EXHAUSTION & TREND_BREAK — the original tradeable set.
-    //   • BUILDING with fundingApr ≤ -200% APR — validated profitable: 9/9
+    //   • BUILDING with fundingApr ≤ FUNDING_THRESHOLD% APR — validated profitable: 9/9
     //     paper-observed winners over 10d (avg +11% at 1×, ~+33% at 3×).
-    //     Above -200% (e.g. -100%) entered mega-squeezes where price ran
+    //     Above FUNDING_THRESHOLD% (e.g. -100%) entered mega-squeezes where price ran
     //     80%+ higher before reversing, so they're excluded.
     // LOW confidence stays Telegram-only — too risky for auto-execution.
     // DRY_RUN suppresses queue writes so a hand-triggered scan can't bleed into
@@ -955,9 +982,11 @@ async function main(): Promise<void> {
 
       const isExtremeBuilding =
         alert.type === "BUILDING" &&
-        alert.fundingApr <= -200 &&
+        alert.fundingApr <= FUNDING_THRESHOLD &&
         // Skip if OI is rising strongly — squeeze still building, not near top
-        (alert.oiDropPct ?? 0) >= BUILDING_OI_RISING_MAX;
+        (alert.oiDropPct ?? 0) >= OI_RISING_MAX &&
+        // Skip if a PUMP_TOP fired recently — squeeze is still accelerating
+        !alert.recentPumpTop;
 
       if (isExhaustionOrBreak || isExtremeBuilding) {
         appendToQueue(alert);
