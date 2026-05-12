@@ -964,8 +964,9 @@ async function main(): Promise<void> {
       }
     }
 
-    if (alert.type === "BUILDING") {
-      // Parse squeeze % from details string e.g. "Squeeze: +20.6% over 10h | ..."
+    // Log BUILDING signals for Strategy B monitoring.
+    // Skipped in dry-run to avoid polluting building_log.jsonl with test entries.
+    if (alert.type === "BUILDING" && !DRY_RUN) {
       const squeezeMatch = alert.details.match(/\+([\d.]+)%/);
       logBuildingSignal({
         coin: alert.coin,
