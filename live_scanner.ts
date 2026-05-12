@@ -1007,5 +1007,5 @@ if (process.argv[1] === __filename) {
   (process.argv.includes("--watch") ? watchMode() : main()).catch(onCrash);
 }
 
-export { buildFundingByHour, defaultState, scanCoin };
+export { buildFundingByHour, buildMergedFundingByHour, defaultState, scanCoin };
 export type { CoinState };

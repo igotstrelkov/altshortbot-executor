@@ -13,7 +13,11 @@
  */
 
 import { existsSync, readFileSync } from "fs";
-import { buildFundingByHour, defaultState, scanCoin } from "./live_scanner.ts";
+import {
+  buildMergedFundingByHour,
+  defaultState,
+  scanCoin,
+} from "./live_scanner.ts";
 import type { Alert } from "./shared_types.ts";
 
 const FIXTURE_DIR = "fixtures";
@@ -35,13 +39,16 @@ interface ScannerTestCase {
 
 // Expectations are calibrated to live-scanner output on the captured fixtures.
 // Notably weaker than backtest_test.ts because:
-//   1. Live scanner uses Bybit-only funding (backtest merges Binance+Bybit). At
-//      the EXHAUSTION trigger hour, Binance funding had often normalised but
-//      Bybit hadn't, so the live scanner keeps seeing BUILDING and never crosses
-//      into the -20%–+5% exhaustion band before cumulative price retraces.
+//   1. Both live scanner and backtest now merge Bybit+Binance funding (most
+//      extreme per hour). However, the EXHAUSTION trigger still rarely fires
+//      because Bybit funding forward-fills between 4–8h settlements, keeping
+//      fundingApr far below -20% for hours after the actual squeeze peak.
 //   2. Bybit's /open-interest API caps at ~200 records (≈8 days), so for any
 //      expected signal before the OI window starts (~2026-04-29 in current
 //      fixtures), checkGate2 and the exhaustion OI gate cannot run.
+//   3. BUILDING signals with oiDropPct < -50 are detected but flagged as
+//      "OI rising" — they fire as alerts but are blocked from the executor
+//      queue in live_scanner.ts main(). scanCoin() itself always fires them.
 // These tests pin actual current behaviour as the regression baseline.
 const TESTS: ScannerTestCase[] = [
   {
@@ -120,7 +127,12 @@ async function runTest(tc: ScannerTestCase): Promise<string[]> {
     oi: any[];
   };
 
-  const fundingByHour = buildFundingByHour(fx.fundingBybit);
+  // Use merged Bybit+Binance funding to match live scanner behaviour
+  const fundingBinance = (fx as any).fundingBinance ?? [];
+  const fundingByHour = buildMergedFundingByHour(
+    fx.fundingBybit,
+    fundingBinance,
+  );
   const failures: string[] = [];
   const allAlerts: Alert[] = [];
   let state = defaultState();
