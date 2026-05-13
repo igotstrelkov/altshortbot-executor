@@ -16,13 +16,24 @@
 import { spawnSync } from "child_process";
 import {
   FUNDING_THRESHOLD,
-  OI_RISING_MAX,
+  BUILDING_OI_RISING_MAX as OI_RISING_MAX,
+  BUILDING_OI_RISING_MAX_REFIRE as OI_RISING_MAX_REFIRE,
   PUMP_TOP_COOLDOWN_H,
-} from "./live_scanner";
+} from "./live_scanner.ts";
 
 // ── Signals to test ───────────────────────────────────────────────────────────
 // Add any signal here to test it against all current gates.
-const SIGNALS = [
+// expectBlocked: true  → simulation fails if this signal is NOT blocked (known-bad case)
+// expectBlocked: false → simulation fails if this signal IS blocked (known-good case, default)
+const SIGNALS: Array<{
+  coin: string;
+  firedAt: string;
+  entry: number;
+  fundingApr: number;
+  result: string;
+  expectBlocked?: boolean;
+  isRefire?: boolean;
+}> = [
   {
     coin: "RAVE",
     firedAt: "2026-05-10 00:12",
@@ -64,6 +75,27 @@ const SIGNALS = [
     entry: 0.0845,
     fundingApr: -741.5,
     result: "+1.36%",
+  },
+  // Known-bad: SOLV May 12 12:00 — first fire, OI rising -182.9% → blocked
+  {
+    coin: "SOLV",
+    firedAt: "2026-05-12 12:00",
+    entry: 0.005578,
+    fundingApr: -447.1,
+    result: "PUMP+DUMP (OI gate)",
+    expectBlocked: true,
+  },
+  // Known-good: SOLV May 12 16:00 — re-fire at -997% APR (2× of -447%), OI -172.5%
+  //   → max +0.27%, final -6.25% DROPPED — immediate clean reversal
+  //   → permissive -200% OI threshold for re-fires should QUEUE this
+  {
+    coin: "SOLV",
+    firedAt: "2026-05-12 16:00",
+    entry: 0.005578,
+    fundingApr: -996.8,
+    result: "DROPPED -6.25%",
+    expectBlocked: false,
+    isRefire: true,
   },
 ];
 
@@ -156,7 +188,8 @@ async function main() {
   );
   console.log("═".repeat(80));
 
-  let queued = 0;
+  let queued = 0,
+    failures = 0;
 
   for (const sig of SIGNALS) {
     process.stdout.write(`\n${sig.coin.padEnd(8)} (${sig.firedAt})... `);
@@ -168,19 +201,34 @@ async function main() {
 
     // Apply gates
     const g1_funding = sig.fundingApr <= FUNDING_THRESHOLD;
-    const g2_oi = oiDropPct >= OI_RISING_MAX;
+    const oiThreshold = sig.isRefire ? OI_RISING_MAX_REFIRE : OI_RISING_MAX;
+    const g2_oi = oiDropPct >= oiThreshold;
     const g3_noPump = recentPumpTops.length === 0;
     const wouldQueue = g1_funding && g2_oi && g3_noPump;
 
     if (wouldQueue) queued++;
 
+    const expectBlocked = sig.expectBlocked === true;
+    const passed = expectBlocked ? !wouldQueue : wouldQueue;
     const status = wouldQueue ? "✅ QUEUED" : "🚫 BLOCKED";
-    console.log(`  ${status}  actual result: ${sig.result}`);
+    const assertion = passed
+      ? expectBlocked
+        ? "✅ correctly blocked"
+        : "✅ correctly queued"
+      : expectBlocked
+        ? "❌ SHOULD BE BLOCKED — gate not firing!"
+        : "❌ SHOULD BE QUEUED — gate too aggressive!";
+    if (!passed) failures++;
+
+    console.log(`  ${status}  ${assertion}`);
+    console.log(
+      `  expected: ${expectBlocked ? "BLOCKED" : "QUEUED"}  |  actual result: ${sig.result}`,
+    );
     console.log(
       `  Funding: ${sig.fundingApr.toFixed(0)}% APR  → Gate 1: ${g1_funding ? "✅ pass" : "❌ fail"}`,
     );
     console.log(
-      `  OI drop: ${oiDropPct.toFixed(1)}%         → Gate 2: ${g2_oi ? "✅ pass" : `❌ blocked (OI rose ${Math.abs(oiDropPct).toFixed(1)}%)`}`,
+      `  OI drop: ${oiDropPct.toFixed(1)}%  (threshold: ${oiThreshold}%)  → Gate 2: ${g2_oi ? "✅ pass" : `❌ blocked (OI rose ${Math.abs(oiDropPct).toFixed(1)}%)`}`,
     );
     console.log(
       `  Pump tops in prior 12h: ${recentPumpTops.length === 0 ? "none" : recentPumpTops.join(", ")}  → Gate 3: ${g3_noPump ? "✅ pass" : "❌ blocked"}`,
@@ -188,9 +236,23 @@ async function main() {
   }
 
   console.log(`\n${"═".repeat(80)}`);
+  const expectedQueued = SIGNALS.filter((s) => !s.expectBlocked).length;
+  const expectedBlocked = SIGNALS.filter((s) => s.expectBlocked).length;
+  const actualBlocked = SIGNALS.length - queued;
   console.log(
-    `Result: ${queued}/${SIGNALS.length} signals would be queued with current gates`,
+    `Queued:  ${queued}/${expectedQueued} expected-queued signals passed`,
   );
+  console.log(
+    `Blocked: ${actualBlocked}/${expectedBlocked} expected-blocked signals confirmed`,
+  );
+  if (failures > 0) {
+    console.log(
+      `\n❌ ${failures} assertion(s) failed — gate thresholds need review`,
+    );
+    process.exit(1);
+  } else {
+    console.log(`\n✅ All assertions passed`);
+  }
   console.log();
 }
 

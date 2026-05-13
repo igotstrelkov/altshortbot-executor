@@ -95,7 +95,7 @@ const TESTS: TestCase[] = [
       "--max-price",
       "2",
       "--pump-pct",
-      "25",
+      "19", // validated: recovers HYPER/WIF pump-tops, no false positives
       "--pump-vol",
       "5",
       "--pump-rsi",
@@ -154,7 +154,7 @@ const TESTS: TestCase[] = [
       "--max-price",
       "2",
       "--pump-pct",
-      "25",
+      "19", // validated: recovers HYPER/WIF pump-tops, no false positives
       "--pump-vol",
       "5",
       "--pump-rsi",
@@ -208,7 +208,7 @@ const TESTS: TestCase[] = [
       "--max-price",
       "2",
       "--pump-pct",
-      "25",
+      "19", // validated: recovers HYPER/WIF pump-tops, no false positives
       "--pump-vol",
       "5",
       "--pump-rsi",
@@ -272,7 +272,7 @@ const TESTS: TestCase[] = [
       "--max-price",
       "2",
       "--pump-pct",
-      "25",
+      "19", // validated: recovers HYPER/WIF pump-tops, no false positives
       "--pump-vol",
       "5",
       "--pump-rsi",
@@ -318,7 +318,7 @@ const TESTS: TestCase[] = [
       "--max-price",
       "2",
       "--pump-pct",
-      "25",
+      "19", // validated: recovers HYPER/WIF pump-tops, no false positives
       "--pump-vol",
       "5",
       "--pump-rsi",
@@ -376,7 +376,7 @@ const TESTS: TestCase[] = [
       "--max-price",
       "2",
       "--pump-pct",
-      "25",
+      "19", // validated: recovers HYPER/WIF pump-tops, no false positives
       "--pump-vol",
       "5",
       "--pump-rsi",
@@ -422,7 +422,7 @@ const TESTS: TestCase[] = [
       "--max-price",
       "2",
       "--pump-pct",
-      "25",
+      "19", // validated: recovers HYPER/WIF pump-tops, no false positives
       "--pump-vol",
       "5",
       "--pump-rsi",
@@ -462,6 +462,62 @@ const TESTS: TestCase[] = [
           {
             firedAt: "2026-05-02 23:00",
             verdict: "DROPPED",
+            phase: "EXHAUSTION",
+          },
+        ],
+      },
+    },
+  },
+  {
+    coin: "BSB",
+    days: 30,
+    args: [
+      "--threshold",
+      "10",
+      "--min-positive",
+      "2",
+      "--min-oi",
+      "2",
+      "--max-price",
+      "2",
+      "--pump-pct",
+      "19",
+      "--pump-vol",
+      "5",
+      "--pump-rsi",
+      "88",
+      "--pump-funding",
+      "0",
+      "--squeeze-pct",
+      "20",
+      "--squeeze-hours",
+      "10",
+      "--squeeze-funding",
+      "-100",
+      "--source",
+      "binance",
+      "--squeeze-oi-drop",
+      "0",
+      // --exhaust-oi-drop intentionally omitted — see WIF comment above
+      "--lookahead",
+      "48",
+    ],
+    expect: {
+      squeeze: {
+        minBuilding: 1, // May 5 00:00 at -268% APR
+        minExhaustion: 10, // 14 total; conservative bound
+        minWins: 4, // 5 confirmed May wins; allow for fixture drift
+        // BUILDING at 2026-05-05 00:00 is verified via minBuilding: 1 above
+        // (BUILDING signals are counted but not stored in signals_detail)
+        mustInclude: [
+          {
+            firedAt: "2026-05-08 21:00",
+            verdict: "DROPPED",
+            phase: "EXHAUSTION",
+          },
+          {
+            firedAt: "2026-05-04 11:00",
+            verdict: "PUMP+DUMP",
             phase: "EXHAUSTION",
           },
         ],

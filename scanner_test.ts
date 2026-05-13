@@ -113,6 +113,28 @@ const TESTS: ScannerTestCase[] = [
       stateAfter: { lastBuildingMinFunding: { lessThan: -500 } },
     },
   },
+  {
+    coin: "WIF",
+    expect: {
+      minAlerts: 2,
+      mustInclude: [
+        // BUILDING at -1699% APR — extreme funding, immediate drop
+        { type: "BUILDING", confidence: "MEDIUM", approxHour: "2026-05-06 08" },
+      ],
+      stateAfter: { lastBuildingMinFunding: { lessThan: -1000 } },
+    },
+  },
+  {
+    coin: "BSB",
+    expect: {
+      minAlerts: 5,
+      mustInclude: [
+        // BUILDING May 5 at -268% APR — precedes profitable exhaustion cluster
+        { type: "BUILDING", confidence: "MEDIUM", approxHour: "2026-05-05" },
+      ],
+      stateAfter: { lastBuildingMinFunding: { lessThan: -200 } },
+    },
+  },
 ];
 
 const MIN_WINDOW = 25; // PARAMS.squeezeHours (10) + RSI warmup (15)
