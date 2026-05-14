@@ -61,7 +61,7 @@ module.exports = {
       // Run once and exit — PM2 restarts on cron schedule.
       // ── KEEP `--paper` UNTIL YOU'VE VALIDATED 2-4 WEEKS OF PAPER P&L. ──
       script: "npx",
-      args: "tsx bybit_executor.ts --paper",
+      args: "tsx bybit_executor.ts",
 
       // Every 5 minutes
       cron_restart: "*/5 * * * *",
