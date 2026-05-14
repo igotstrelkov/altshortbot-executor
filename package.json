@@ -6,6 +6,7 @@
   },
   "dependencies": {
     "@nktkas/hyperliquid": "^0.32.2",
+    "bybit-api": "^4.6.2",
     "viem": "^2.48.11"
   }
 }
