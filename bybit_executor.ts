@@ -569,9 +569,11 @@ async function main(): Promise<void> {
   }
 
   console.log(`\n${queue.length} signal(s) in queue...`);
+  // NOTE: clearQueue() moved to AFTER equity check — prevents signal loss on failure
 
-  // Check position cap before clearing queue
-  if (Object.keys(store.open).length >= RISK.maxPositions) {
+  // Check position cap
+  const openCount = Object.keys(store.open).length;
+  if (openCount >= RISK.maxPositions) {
     console.log(
       `  At max positions (${RISK.maxPositions}) — signals deferred to next run`,
     );
@@ -579,7 +581,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Get account equity before clearing queue — if this fails, signals are preserved
+  // Get account equity — must succeed before clearing queue
   let equity = store.paperEquityUsdt;
   if (!IS_PAPER) {
     const liveEquity = await fetchAccountEquity();
@@ -588,13 +590,12 @@ async function main(): Promise<void> {
         "  Could not fetch account equity — signals preserved for next run",
       );
       savePositions(store);
-      return;
+      return; // queue intact — will retry next cron tick
     }
     equity = liveEquity;
   }
 
-  // Safe to clear now — equity confirmed, execution proceeding
-  clearQueue();
+  clearQueue(); // safe to clear now — equity confirmed, execution proceeding
 
   let executed = 0;
   for (const sig of queue) {

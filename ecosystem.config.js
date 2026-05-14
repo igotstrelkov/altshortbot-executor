@@ -40,7 +40,7 @@ module.exports = {
       args: "tsx live_scanner.ts",
 
       // Hourly at :05 past (gives exchanges 5 min after settlement)
-      cron_restart: "5 * * * *",
+      cron_restart: "*/15 * * * *",
       autorestart: false,
 
       out_file: "logs/scanner.log",
@@ -49,10 +49,8 @@ module.exports = {
 
       env: {
         NODE_ENV: "production",
-        TELEGRAM_TOKEN:
-          process.env.TELEGRAM_TOKEN ??
-          "8018724680:AAEOvjLL8CyuniEpWCIDlG5UJCYvo-yn2kE",
-        TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID ?? "6894700172",
+        TELEGRAM_TOKEN: process.env.TELEGRAM_TOKEN ?? "",
+        TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID ?? "",
         // Optional: override watchlist (comma-separated)
         // SCANNER_COINS: "ORDI,KNC,HIVE,HYPER,ENJ",
       },
@@ -75,14 +73,10 @@ module.exports = {
 
       env: {
         NODE_ENV: "production",
-        TELEGRAM_TOKEN:
-          process.env.TELEGRAM_TOKEN ??
-          "8018724680:AAEOvjLL8CyuniEpWCIDlG5UJCYvo-yn2kE",
-        TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID ?? "6894700172",
-        BYBIT_API_KEY: process.env.BYBIT_API_KEY ?? "BDO6mOMYjdwlEFpQTD",
-        BYBIT_API_SECRET:
-          process.env.BYBIT_API_SECRET ??
-          "DSwoVCnHYnPPadfLtBMFvE8M10C8XsyGYy1i",
+        TELEGRAM_TOKEN: process.env.TELEGRAM_TOKEN ?? "",
+        TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID ?? "",
+        BYBIT_API_KEY: process.env.BYBIT_API_KEY ?? "",
+        BYBIT_API_SECRET: process.env.BYBIT_API_SECRET ?? "",
         BYBIT_PAPER_ACCOUNT: "10000", // simulated account size for paper mode
         // BYBIT_TESTNET:     "1",        // uncomment to use testnet
       },
