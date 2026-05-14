@@ -28,6 +28,7 @@ interface BuildingSignal {
   entry: number;
   fundingApr: number;
   squeeze: number;
+  candleHighGapPct?: number; // % between candle high and close at signal time
 }
 
 // ── Today's 5 signals (seed data) ────────────────────────────────────────────

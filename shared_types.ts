@@ -11,6 +11,7 @@ export interface Alert {
   oiDropPct?: number; // +ve = OI dropped, -ve = OI rose (squeeze still building)
   recentPumpTop?: boolean; // PUMP_TOP fired within last 12h — squeeze still accelerating
   isRefire?: boolean; // funding became 2× more extreme — more permissive OI gate applies
+  candleHighGapPct?: number;
 }
 
 export interface QueuedSignal extends Alert {

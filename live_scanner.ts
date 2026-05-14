@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { logBuildingSignal } from "./check_building_signals.ts";
 import type { Alert, QueuedSignal } from "./shared_types.ts";
@@ -247,6 +247,9 @@ function saveState(state: Record<string, CoinState>): void {
 
 // ─── Signal queue (consumed by hl_executor.ts) ───────────────────────────────
 const QUEUE_FILE = "signal_queue.json";
+const NEAR_MISS_FILE = "near_miss.jsonl";
+// Coins with cumulative squeeze ≥ this % but < squeezeMinPct are near-misses
+const NEAR_MISS_MIN_PCT = 15;
 
 function appendToQueue(alert: Alert): void {
   let queue: QueuedSignal[] = [];
@@ -610,17 +613,24 @@ function getConfidence(
 }
 
 // ─── Core per-coin scanner ────────────────────────────────────────────────────
+interface NearMissInfo {
+  cumulativePct: number;
+  fundingApr: number;
+  price: number;
+}
+
 function scanCoin(
   coin: string,
   state: CoinState,
   candles: Candle[],
   mergedFunding: Record<number, number>,
   oiHistory: OIRecord[],
-): { alerts: Alert[]; newState: CoinState } {
+): { alerts: Alert[]; newState: CoinState; nearMiss: NearMissInfo | null } {
   const alerts: Alert[] = [];
   const newState: CoinState = { ...state };
 
-  if (candles.length < PARAMS.squeezeHours + 15) return { alerts, newState };
+  if (candles.length < PARAMS.squeezeHours + 15)
+    return { alerts, newState, nearMiss: null };
 
   const price = candles[candles.length - 1].c;
   const ts = candles[candles.length - 1].t;
@@ -695,6 +705,23 @@ function scanCoin(
   // ── Short squeeze ─────────────────────────────────────────────────────────
   const candleWindow = candles.slice(-(PARAMS.squeezeHours + 2));
   const sq = detectShortSqueeze(candleWindow, oiSeries, fRate);
+
+  // ── Near-miss detection ────────────────────────────────────────────────────
+  // Coins approaching the squeeze threshold without triggering — logged in main()
+  // to analyse whether 15m candles would catch more signals.
+  let nearMiss: NearMissInfo | null = null;
+  if (!sq.triggered && candleWindow.length >= PARAMS.squeezeHours + 2) {
+    const startClose = candleWindow[0].c;
+    const windowHigh = Math.max(...candleWindow.slice(1).map((c) => c.h));
+    const nearMissPct =
+      startClose > 0 ? ((windowHigh - startClose) / startClose) * 100 : 0;
+    if (
+      nearMissPct >= NEAR_MISS_MIN_PCT &&
+      fundingApr <= PARAMS.squeezeMaxFundingApr
+    ) {
+      nearMiss = { cumulativePct: nearMissPct, fundingApr, price };
+    }
+  }
 
   if (sq.triggered && sq.phase) {
     if (sq.phase === "BUILDING") {
@@ -771,6 +798,12 @@ function scanCoin(
           oiDropPct: sq.oiDropPct,
           recentPumpTop: recentPumpTop || undefined,
           isRefire: isRefire || undefined,
+          // % between candle high and close — measures how much of the move
+          // happened within the current candle before our scanner fired
+          candleHighGapPct:
+            phase === "BUILDING"
+              ? ((candles[candles.length - 1].h - price) / price) * 100
+              : undefined,
         });
 
         if (phase === "BUILDING") {
@@ -798,7 +831,7 @@ function scanCoin(
       newState.lastSqueezePhase = null;
   }
 
-  return { alerts, newState };
+  return { alerts, newState, nearMiss };
 }
 
 // ─── Telegram ─────────────────────────────────────────────────────────────────
@@ -900,6 +933,30 @@ async function sendTelegram(message: string): Promise<void> {
 }
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
+// ─── Near-miss logger ────────────────────────────────────────────────────────
+// Logs coins that almost triggered the squeeze threshold but didn't quite reach it.
+// Useful for detecting patterns that 15m candles might catch earlier.
+function logNearMiss(
+  coin: string,
+  cumulativePct: number,
+  fundingApr: number,
+  price: number,
+): void {
+  if (DRY_RUN) return;
+  const entry = {
+    coin,
+    ts: new Date().toISOString(),
+    cumulativePct,
+    fundingApr,
+    price,
+  };
+  try {
+    appendFileSync(NEAR_MISS_FILE, JSON.stringify(entry) + "\n", "utf8");
+  } catch {
+    /* non-fatal */
+  }
+}
+
 async function getCoins(): Promise<string[]> {
   const arg = process.argv.find((_, i) => process.argv[i - 1] === "--coins");
   const env = process.env.SCANNER_COINS;
@@ -941,7 +998,7 @@ async function main(): Promise<void> {
       const fundingByHour = buildMergedFundingByHour(bbFunding, bnFunding);
       const coinState = state[coin] ?? defaultState();
 
-      const { alerts, newState } = scanCoin(
+      const { alerts, newState, nearMiss } = scanCoin(
         coin,
         coinState,
         candles,
@@ -949,6 +1006,14 @@ async function main(): Promise<void> {
         oiHistory,
       );
       state[coin] = newState;
+      if (nearMiss && !DRY_RUN) {
+        logNearMiss(
+          coin,
+          nearMiss.cumulativePct,
+          nearMiss.fundingApr,
+          nearMiss.price,
+        );
+      }
 
       if (alerts.length) {
         console.log(
@@ -1018,9 +1083,11 @@ async function main(): Promise<void> {
         entry: alert.entry,
         fundingApr: alert.fundingApr,
         squeeze: squeezeMatch ? parseFloat(squeezeMatch[1]) : 0,
+        candleHighGapPct: alert.candleHighGapPct,
       });
     }
   }
+
   saveState(state);
 
   console.log(`\nDone. ${allAlerts.length} alert(s) sent.\n`);
