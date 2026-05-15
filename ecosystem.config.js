@@ -29,6 +29,7 @@
 // Going live (after paper validation):
 //   1. Remove `--paper` from altshortbot-executor args below
 //   2. pm2 restart altshortbot-executor
+require("dotenv").config();
 
 module.exports = {
   apps: [
