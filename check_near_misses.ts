@@ -65,39 +65,62 @@ for (const e of entries) {
 }
 
 // ── Sort by peak cumulative % desc ───────────────────────────────────────────
+// Split: true near-misses (peak < threshold) vs blocked squeezes (peak >= threshold)
 const sorted = [...byCoind.entries()].sort((a, b) => b[1].max - a[1].max);
+const nearMisses = sorted.filter(([, d]) => d.max < SQUEEZE_TRIGGER);
+const blocked = sorted.filter(([, d]) => d.max >= SQUEEZE_TRIGGER);
 
 console.log(`\nNear-Miss Report — ${SHOW_ALL ? "all time" : `last ${DAYS}d`}`);
 console.log(
-  `Squeeze threshold: ${SQUEEZE_TRIGGER}%  |  Near-miss range: 15–${SQUEEZE_TRIGGER - 1}%`,
+  `Squeeze threshold: ${SQUEEZE_TRIGGER}%  |  ${entries.length} events across ${sorted.length} coins\n`,
 );
-console.log(`${entries.length} events across ${sorted.length} coins\n`);
 
 if (sorted.length === 0) {
   console.log("  No near-misses in this window.\n");
   process.exit(0);
 }
 
-const hdr = `${"Coin".padEnd(12)} ${"Peak".padStart(7)} ${"Gap to trigger".padStart(15)} ${"Scans".padStart(6)}  Last seen`;
-console.log(hdr);
-console.log("─".repeat(hdr.length));
+const hdr = `${"Coin".padEnd(12)} ${"Peak".padStart(7)} ${"Gap".padStart(10)} ${"Scans".padStart(6)}  Last seen`;
 
-for (const [coin, data] of sorted) {
-  const gapToTrigger = Math.max(0, SQUEEZE_TRIGGER - data.max); // clamp: peak may exceed threshold
-  const bar =
-    "█".repeat(Math.round(data.max / 2)) +
-    "░".repeat(Math.round(gapToTrigger / 2));
-  const lastSeen = data.last.ts.slice(0, 16).replace("T", " ");
-  console.log(
-    `${coin.padEnd(12)} ${(data.max.toFixed(1) + "%").padStart(7)} ` +
-      `${("+" + gapToTrigger.toFixed(1) + "% needed").padStart(15)} ` +
-      `${String(data.count).padStart(6)}  ${lastSeen} UTC`,
-  );
+// True near-misses (15–19%)
+console.log(
+  `True near-misses (15–${SQUEEZE_TRIGGER - 1}% cumulative — price gate almost triggered):`,
+);
+if (nearMisses.length === 0) {
+  console.log("  None in this window.");
+} else {
+  console.log(hdr);
+  console.log("─".repeat(hdr.length));
+  for (const [coin, data] of nearMisses) {
+    const gap = (SQUEEZE_TRIGGER - data.max).toFixed(1);
+    const lastSeen = data.last.ts.slice(0, 16).replace("T", " ");
+    console.log(
+      `${coin.padEnd(12)} ${(data.max.toFixed(1) + "%").padStart(7)} ` +
+        `${("+" + gap + "% needed").padStart(10)} ` +
+        `${String(data.count).padStart(6)}  ${lastSeen} UTC`,
+    );
+  }
 }
 
-console.log(
-  `\nThese coins almost triggered but didn't reach ${SQUEEZE_TRIGGER}%.`,
-);
-console.log(
-  `If you see the same coins repeatedly, 15m candles may catch them earlier.\n`,
-);
+// Blocked squeezes (peak >= 20%, but OI/candles condition failed)
+if (blocked.length > 0) {
+  console.log(
+    `\nBlocked squeezes (exceeded ${SQUEEZE_TRIGGER}% but failed OI or positive-candle condition):`,
+  );
+  console.log(hdr);
+  console.log("─".repeat(hdr.length));
+  for (const [coin, data] of blocked) {
+    const lastSeen = data.last.ts.slice(0, 16).replace("T", " ");
+    console.log(
+      `${coin.padEnd(12)} ${(data.max.toFixed(1) + "%").padStart(7)} ` +
+        `${"(blocked)".padStart(10)} ` +
+        `${String(data.count).padStart(6)}  ${lastSeen} UTC`,
+    );
+  }
+}
+
+if (nearMisses.length > 0)
+  console.log(
+    `\nSame coin appearing repeatedly → 15m candles may catch it earlier.`,
+  );
+console.log();
