@@ -48,7 +48,9 @@ const RISK = {
   riskPerTrade: 0.02, // 2% account risk per trade
   stopLossPct: 0.12, // 12% stop loss
   maxPositions: 3, // max concurrent open positions
-  timeoutH: 72, // close after 72h regardless
+  timeoutH: 72, // close after 72h regardless (validated: 72h > 48h across 32 building signals)
+  trailActivatePct: 5, // activate trailing stop when P&L reaches 5%
+  trailDistancePct: 4, // trail 4% above the lowest price seen
 } as const;
 
 const QUEUE_FILE = "signal_queue.json";
@@ -377,9 +379,48 @@ async function managePositions(store: BybitPositionStore): Promise<void> {
 
     const pnlPct = ((pos.entryPx - currentPx) / pos.entryPx) * 100;
 
-    // Check if stop was hit (live: position closed by exchange)
+    // ── Trailing stop logic ───────────────────────────────────────────────────
+    // Activate when position first reaches trailActivatePct (5%) profit.
+    // Once active, trail trailDistancePct (4%) above the lowest price seen.
+    if (!pos.trailingActive && pnlPct >= RISK.trailActivatePct) {
+      pos.trailingActive = true;
+      pos.lowestPriceSeen = currentPx;
+      pos.trailingStopPx = currentPx * (1 + RISK.trailDistancePct / 100);
+      const tsStr = pos.trailingStopPx.toFixed(6);
+      console.log(
+        `  ${coin}: trailing stop ACTIVATED — stop $${tsStr} (trail ${RISK.trailDistancePct}%)`,
+      );
+      await sendTelegram(
+        `📐 *${coin}* trailing stop activated
+` + `P&L: ${pnlPct.toFixed(2)}% | Trailing stop: $${tsStr}`,
+      );
+    }
+
+    if (pos.trailingActive) {
+      // Update lowest price and trailing stop as position moves in our favour
+      if (currentPx < (pos.lowestPriceSeen ?? currentPx)) {
+        pos.lowestPriceSeen = currentPx;
+        pos.trailingStopPx = currentPx * (1 + RISK.trailDistancePct / 100);
+      }
+      console.log(
+        `  ${coin}: open ${ageH.toFixed(1)}h — px $${currentPx.toFixed(6)}` +
+          ` — ${pnlPct.toFixed(2)}% 📐 trail $${(pos.trailingStopPx ?? 0).toFixed(6)}`,
+      );
+    } else {
+      console.log(
+        `  ${coin}: open ${ageH.toFixed(1)}h — px $${currentPx.toFixed(6)} — ${pnlPct.toFixed(2)}%`,
+      );
+    }
+
+    // ── Close condition checks ────────────────────────────────────────────────
     let stopHit = false;
-    if (!IS_PAPER) {
+    let trailingHit = false;
+
+    // Trailing stop takes priority when active
+    if (pos.trailingActive && currentPx >= (pos.trailingStopPx ?? Infinity)) {
+      trailingHit = true;
+    } else if (!IS_PAPER) {
+      // Check if exchange closed the position (hard stop triggered)
       const liveSize = await fetchLivePositionSize(coin);
       if (liveSize === 0) stopHit = true;
     } else {
@@ -389,11 +430,14 @@ async function managePositions(store: BybitPositionStore): Promise<void> {
     let closeReason: PaperTrade["closeReason"] | null = null;
     let closePx = currentPx;
 
-    if (stopHit) {
+    if (trailingHit) {
+      closeReason = "trailing";
+      if (!IS_PAPER) await closePosition(coin, "trailing");
+    } else if (stopHit) {
       closeReason = "stop";
       closePx = IS_PAPER
         ? pos.stopLossPx
-        : await fetchActualClosePrice(coin, currentPx); // actual fill, not current price
+        : await fetchActualClosePrice(coin, currentPx);
     } else if (ageH >= RISK.timeoutH) {
       closeReason = "timeout";
       if (!IS_PAPER) await closePosition(coin, "timeout");

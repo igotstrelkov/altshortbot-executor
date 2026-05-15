@@ -239,6 +239,7 @@ Uses `bybit-api` npm SDK. HMAC auth handled automatically.
 - **`closePosition`** uses `qty: "0"` + `reduceOnly: true` + `closeOnTrigger: true` to close full position
 - **`clearQueue`** runs **after** `fetchAccountEquity` succeeds — signals preserved on API failure
 - **Exchange-closed detection**: `getPositionInfo` returns `size: "0"` when stop triggered by exchange
+- **Trailing stop**: managed in code — activates at 5% profit, trails 4% above the lowest price seen. Ratchets down each run as price falls. Closes with `closeReason: "trailing"` when price bounces above trail. Hard stop on Bybit remains as safety net. Calibrate `trailActivatePct` / `trailDistancePct` after 20+ live signals.
 
 ### Paper vs demo vs live
 
@@ -277,7 +278,7 @@ After editing: `source ~/.bashrc && pm2 restart all`
 --threshold 10 --min-positive 2 --min-oi 2 --max-price 2
 --pump-pct 19 --pump-vol 5 --pump-rsi 88 --pump-funding 0
 --squeeze-pct 20 --squeeze-hours 10 --squeeze-funding -100 --squeeze-oi-drop 0
---exhaust-funding -20 --exhaust-oi-drop 3 --lookahead 48
+--exhaust-funding -20 --exhaust-oi-drop 3 --lookahead 72
 ```
 
 Validated across 10 coins. Do not change without full backtest revalidation.
@@ -302,9 +303,16 @@ Drop to **1% account risk** (not 2%). The jump from demo to live introduces exec
 
 Two levers, in this order:
 
-**1. Trailing stops** — highest impact. Study the peak-vs-final gap across 30+ signals to calibrate the trail distance. Example: if SNT at -2444% APR peaked at +20% before settling at +10%, a trailing stop that activates at +8% and trails 5% would lock in +15% instead of waiting 48h.
+**1. Trailing stops** — implemented. Activates at 5% profit, trails 4% above the lowest price seen.
 
-The executor already has `closeReason: "trailing"` typed in `shared_types.ts`. Implementation: add a `trailingActive` flag to `PositionRecord` and update `managePositions` to move the stop up as price drops.
+Parameters in `bybit_executor.ts`:
+
+```typescript
+trailActivatePct: 5,   // activate when P&L reaches 5%
+trailDistancePct: 4,   // trail 4% above the lowest price seen
+```
+
+Validated on 32 BUILDING signals across 8 coins: 72h timeout > 48h timeout, and trailing stops expected to improve further by capturing peak P&L instead of fixed-time exit. Calibrate activation and trail distance after 20+ live signals with trailing active — check `closeReason: "trailing"` in `bybit_positions.json` to assess if exiting too early or too late.
 
 **2. Tiered sizing by funding intensity** — only after trailing stops are working:
 
@@ -324,18 +332,20 @@ More extreme funding = more violent reversal = higher conviction. Cap total conc
 
 ## Deviations from original HL plan
 
-| Where               | Original                                        | Shipped                                                         | Rationale                                                 |
-| ------------------- | ----------------------------------------------- | --------------------------------------------------------------- | --------------------------------------------------------- |
-| Executor            | Hyperliquid (`hl_executor.ts`)                  | Bybit (`bybit_executor.ts`)                                     | Only 14% of signals listed on HL; all executable on Bybit |
-| Executor client     | HL SDK                                          | `bybit-api` RestClientV5 with `demoTrading: true`               | Bybit native; demo uses real prices unlike testnet        |
-| Scanner cron        | `5 * * * *` (hourly)                            | `*/15 * * * *` (15-min)                                         | Catches signals 45 min earlier; well within rate limits   |
-| Sizing math         | `notional = marginUsed × maxLeverage` (6% risk) | `notional = riskUsd / stopLossPct` (2% risk)                    | Plan formula contradicted its own variable name           |
-| PM2 names           | `altshortbot`                                   | `altshortbot-scanner` + `altshortbot-executor`                  | Two processes need distinct names                         |
-| `--pump-pct`        | 25                                              | 19                                                              | Recovers HYPER/WIF pump-tops, no false positives          |
-| Funding source      | Bybit only                                      | Merged Bybit + Binance (most extreme per hour)                  | Bybit-only misses HYPER/SPK signals                       |
-| Tradeable signals   | `{EXHAUSTION, TREND_BREAK}`                     | `+ BUILDING` when all 3 gates pass                              | 10-day paper: 9/9 winners at ≤ -200% APR                  |
-| BUILDING fires      | Once per wave                                   | Re-fires at 2× funding; OI gate -150% (first) / -200% (re-fire) | Captures better entries; SOLV/PEAQ evidence               |
-| `clearQueue` timing | Before equity check                             | After equity check                                              | Signals were lost on transient API failures               |
-| `FUNDING` alerts    | Telegram                                        | Console only                                                    | 300+/scan floods chat; never affects positions            |
-| `--dry-run`         | Suppresses Telegram                             | Suppresses queue + building log; Telegram fires                 | A dry run the executor would trade from is not dry        |
-| `signalType`        | `"EXHAUSTION"\|"TREND_BREAK"`                   | `+ "BUILDING"`                                                  | Widened after BUILDING became tradeable                   |
+| Where               | Original                                        | Shipped                                                         | Rationale                                                              |
+| ------------------- | ----------------------------------------------- | --------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| Executor            | Hyperliquid (`hl_executor.ts`)                  | Bybit (`bybit_executor.ts`)                                     | Only 14% of signals listed on HL; all executable on Bybit              |
+| Executor client     | HL SDK                                          | `bybit-api` RestClientV5 with `demoTrading: true`               | Bybit native; demo uses real prices unlike testnet                     |
+| Scanner cron        | `5 * * * *` (hourly)                            | `*/15 * * * *` (15-min)                                         | Catches signals 45 min earlier; well within rate limits                |
+| Sizing math         | `notional = marginUsed × maxLeverage` (6% risk) | `notional = riskUsd / stopLossPct` (2% risk)                    | Plan formula contradicted its own variable name                        |
+| PM2 names           | `altshortbot`                                   | `altshortbot-scanner` + `altshortbot-executor`                  | Two processes need distinct names                                      |
+| `--pump-pct`        | 25                                              | 19                                                              | Recovers HYPER/WIF pump-tops, no false positives                       |
+| Funding source      | Bybit only                                      | Merged Bybit + Binance (most extreme per hour)                  | Bybit-only misses HYPER/SPK signals                                    |
+| Tradeable signals   | `{EXHAUSTION, TREND_BREAK}`                     | `+ BUILDING` when all 3 gates pass                              | 10-day paper: 9/9 winners at ≤ -200% APR                               |
+| BUILDING fires      | Once per wave                                   | Re-fires at 2× funding; OI gate -150% (first) / -200% (re-fire) | Captures better entries; SOLV/PEAQ evidence                            |
+| `clearQueue` timing | Before equity check                             | After equity check                                              | Signals were lost on transient API failures                            |
+| Timeout             | 48h                                             | 72h                                                             | Validated: 72h avg -6.24% vs 48h avg -4.65% across 32 BUILDING signals |
+| Trailing stop       | Not implemented                                 | Activates at 5%, trails 4%                                      | Captures peak P&L vs fixed-time exit                                   |
+| `FUNDING` alerts    | Telegram                                        | Console only                                                    | 300+/scan floods chat; never affects positions                         |
+| `--dry-run`         | Suppresses Telegram                             | Suppresses queue + building log; Telegram fires                 | A dry run the executor would trade from is not dry                     |
+| `signalType`        | `"EXHAUSTION"\|"TREND_BREAK"`                   | `+ "BUILDING"`                                                  | Widened after BUILDING became tradeable                                |

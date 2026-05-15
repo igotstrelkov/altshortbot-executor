@@ -11,18 +11,18 @@
  */
 
 import { existsSync, readFileSync } from "fs";
-import type { PositionRecord, PaperTrade } from "./shared_types.ts";
+import type { PaperTrade, PositionRecord } from "./shared_types.ts";
 
-const POSITIONS_FILE  = "bybit_positions.json";
-const BB_BASE         = "https://api.bybit.com";
-const PAPER_START     = 10_000;
-const SHOW_ALL        = process.argv.includes("--all");
-const OPEN_ONLY       = process.argv.includes("--open");
+const POSITIONS_FILE = "bybit_positions.json";
+const BB_BASE = "https://api.bybit.com";
+const PAPER_START = 10_000;
+const SHOW_ALL = process.argv.includes("--all");
+const OPEN_ONLY = process.argv.includes("--open");
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface BybitPositionStore {
-  open:            Record<string, PositionRecord>;
-  closed:          PaperTrade[];
+  open: Record<string, PositionRecord>;
+  closed: PaperTrade[];
   paperEquityUsdt: number;
 }
 
@@ -30,12 +30,16 @@ interface BybitPositionStore {
 async function fetchPrice(coin: string): Promise<number | null> {
   try {
     const res = await fetch(
-      `${BB_BASE}/v5/market/tickers?category=linear&symbol=${coin}USDT`
+      `${BB_BASE}/v5/market/tickers?category=linear&symbol=${coin}USDT`,
     );
-    const d = await res.json() as { result?: { list?: { lastPrice: string }[] } };
+    const d = (await res.json()) as {
+      result?: { list?: { lastPrice: string }[] };
+    };
     const p = d?.result?.list?.[0]?.lastPrice;
     return p ? parseFloat(p) : null;
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
 function fmtAge(ms: number): string {
@@ -53,13 +57,21 @@ function fmtDate(ms: number): string {
 }
 
 function pnlIcon(pct: number): string {
-  if (pct >  3) return "✅";
+  if (pct > 3) return "✅";
   if (pct < -3) return "❌";
   return "😐";
 }
 
 function reasonIcon(r: string): string {
-  return r === "stop" ? "🛑" : r === "timeout" ? "⏱" : r === "target" ? "🎯" : r === "trailing" ? "📐" : "📋";
+  return r === "stop"
+    ? "🛑"
+    : r === "timeout"
+      ? "⏱"
+      : r === "target"
+        ? "🎯"
+        : r === "trailing"
+          ? "📐"
+          : "📋";
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -69,11 +81,15 @@ async function main(): Promise<void> {
     return;
   }
 
-  const store: BybitPositionStore = JSON.parse(readFileSync(POSITIONS_FILE, "utf8"));
+  const store: BybitPositionStore = JSON.parse(
+    readFileSync(POSITIONS_FILE, "utf8"),
+  );
   const nowMs = Date.now();
 
   console.log(`\nAltShortBot Bybit — Position Monitor`);
-  console.log(`${new Date().toISOString()}  |  paper equity: $${store.paperEquityUsdt.toFixed(2)}`);
+  console.log(
+    `${new Date().toISOString()}  |  paper equity: $${store.paperEquityUsdt.toFixed(2)}`,
+  );
 
   // ── Open positions ──────────────────────────────────────────────────────────
   const openEntries = Object.entries(store.open);
@@ -88,30 +104,50 @@ async function main(): Promise<void> {
 
     for (const [coin, pos] of openEntries) {
       const price = await fetchPrice(coin);
-      if (!price) { console.log(`  ${coin}: price unavailable`); continue; }
-      const pnlPct  = (pos.entryPx - price) / pos.entryPx * 100;
-      const pnl3x   = pnlPct * 3;
-      const age     = fmtAge(nowMs - pos.openedAt);
-      const icon    = pnlIcon(pnlPct);
-      const stopPct = ((pos.stopLossPx - pos.entryPx) / pos.entryPx * 100).toFixed(0);
+      if (!price) {
+        console.log(`  ${coin}: price unavailable`);
+        continue;
+      }
+      const pnlPct = ((pos.entryPx - price) / pos.entryPx) * 100;
+      const pnl3x = pnlPct * 3;
+      const age = fmtAge(nowMs - pos.openedAt);
+      const icon = pnlIcon(pnlPct);
+      const stopPct = (
+        ((pos.stopLossPx - pos.entryPx) / pos.entryPx) *
+        100
+      ).toFixed(0);
+
+      // Trailing stop line (shown below main row when active)
+      const trailLine =
+        (pos as any).trailingActive && (pos as any).trailingStopPx
+          ? `\n  ${"".padEnd(10)}  📐 trailing stop: $${(pos as any).trailingStopPx.toFixed(6)}` +
+            ` | low: $${((pos as any).lowestPriceSeen ?? price).toFixed(6)}` +
+            ` | locks in: ${(((pos.entryPx - (pos as any).trailingStopPx) / pos.entryPx) * 100).toFixed(2)}%`
+          : "";
 
       console.log(
         `${coin.padEnd(10)} ${fmtTime(pos.openedAt).padStart(7)} ${age.padStart(9)}` +
-        `   ${("$" + pos.entryPx.toFixed(6)).padStart(10)} ${("$" + price.toFixed(6)).padStart(10)}` +
-        `   ${(pnlPct.toFixed(2) + "%").padStart(7)} ${(pnl3x.toFixed(2) + "%").padStart(8)}` +
-        `   ${pos.signalType.padStart(10)}  $${pos.stopLossPx.toFixed(6)} (+${stopPct}%)  ${icon}`
+          `   ${("$" + pos.entryPx.toFixed(6)).padStart(10)} ${("$" + price.toFixed(6)).padStart(10)}` +
+          `   ${(pnlPct.toFixed(2) + "%").padStart(7)} ${(pnl3x.toFixed(2) + "%").padStart(8)}` +
+          `   ${pos.signalType.padStart(10)}  🛑 $${pos.stopLossPx.toFixed(6)} (+${stopPct}%)  ${icon}` +
+          trailLine,
       );
     }
   }
 
-  if (OPEN_ONLY) { console.log(); return; }
+  if (OPEN_ONLY) {
+    console.log();
+    return;
+  }
 
   // ── Closed positions ────────────────────────────────────────────────────────
-  const closed   = store.closed;
-  const showN    = SHOW_ALL ? closed.length : Math.min(closed.length, 10);
-  const showing  = closed.slice(-showN).reverse();
+  const closed = store.closed;
+  const showN = SHOW_ALL ? closed.length : Math.min(closed.length, 10);
+  const showing = closed.slice(-showN).reverse();
 
-  console.log(`\nClosed (${closed.length})${!SHOW_ALL && closed.length > 10 ? ` — showing last ${showN}` : ""}`);
+  console.log(
+    `\nClosed (${closed.length})${!SHOW_ALL && closed.length > 10 ? ` — showing last ${showN}` : ""}`,
+  );
 
   if (closed.length === 0) {
     console.log("  No closed positions yet.");
@@ -124,10 +160,10 @@ async function main(): Promise<void> {
       const icon = pnlIcon(t.pnlPct);
       console.log(
         `${t.coin.padEnd(10)} ${fmtDate(t.openedAt).padStart(16)}` +
-        ` ${("$" + t.entryPx.toFixed(6)).padStart(10)} ${("$" + t.exitPx.toFixed(6)).padStart(10)}` +
-        `   ${(t.pnlPct.toFixed(2) + "%").padStart(7)} ${(t.pnlPct * 3).toFixed(2).padStart(7) + "%"}` +
-        ` ${(t.pnlUsdc >= 0 ? "+" : "") + t.pnlUsdc.toFixed(2).padStart(7)}` +
-        `   ${reasonIcon(t.closeReason)} ${t.closeReason.padEnd(8)} ${icon}`
+          ` ${("$" + t.entryPx.toFixed(6)).padStart(10)} ${("$" + t.exitPx.toFixed(6)).padStart(10)}` +
+          `   ${(t.pnlPct.toFixed(2) + "%").padStart(7)} ${(t.pnlPct * 3).toFixed(2).padStart(7) + "%"}` +
+          ` ${(t.pnlUsdc >= 0 ? "+" : "") + t.pnlUsdc.toFixed(2).padStart(7)}` +
+          `   ${reasonIcon(t.closeReason)} ${t.closeReason.padEnd(8)} ${icon}`,
       );
     }
 
@@ -138,35 +174,38 @@ async function main(): Promise<void> {
 
   // ── Summary ─────────────────────────────────────────────────────────────────
   if (closed.length > 0) {
-    const wins     = closed.filter(t => t.pnlPct > 0).length;
-    const losses   = closed.filter(t => t.pnlPct < 0).length;
-    const neutral  = closed.length - wins - losses;
-    const avgPnl   = closed.reduce((a, t) => a + t.pnlPct, 0) / closed.length;
+    const wins = closed.filter((t) => t.pnlPct > 0).length;
+    const losses = closed.filter((t) => t.pnlPct < 0).length;
+    const neutral = closed.length - wins - losses;
+    const avgPnl = closed.reduce((a, t) => a + t.pnlPct, 0) / closed.length;
     const totalPnl = store.paperEquityUsdt - PAPER_START;
     const totalPct = (totalPnl / PAPER_START) * 100;
 
-    const stopOuts  = closed.filter(t => t.closeReason === "stop").length;
-    const timeouts  = closed.filter(t => t.closeReason === "timeout").length;
+    const stopOuts = closed.filter((t) => t.closeReason === "stop").length;
+    const timeouts = closed.filter((t) => t.closeReason === "timeout").length;
 
     console.log(`\n${"─".repeat(50)}`);
     console.log(
       `  ${closed.length} closed  |  ` +
-      `${wins}W ${losses}L${neutral ? ` ${neutral}N` : ""}  |  ` +
-      `win rate: ${(wins / (wins + losses || 1) * 100).toFixed(0)}%  |  ` +
-      `avg: ${avgPnl >= 0 ? "+" : ""}${avgPnl.toFixed(2)}% (${(avgPnl * 3).toFixed(2)}% at 3x)`
+        `${wins}W ${losses}L${neutral ? ` ${neutral}N` : ""}  |  ` +
+        `win rate: ${((wins / (wins + losses || 1)) * 100).toFixed(0)}%  |  ` +
+        `avg: ${avgPnl >= 0 ? "+" : ""}${avgPnl.toFixed(2)}% (${(avgPnl * 3).toFixed(2)}% at 3x)`,
     );
     if (stopOuts || timeouts) {
       console.log(`  Stop-outs: ${stopOuts}  |  Timeouts: ${timeouts}`);
     }
     console.log(
       `  Paper equity: $${store.paperEquityUsdt.toFixed(2)}  ` +
-      `(start: $${PAPER_START.toLocaleString()}  ` +
-      `${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)}  ` +
-      `${totalPct >= 0 ? "+" : ""}${totalPct.toFixed(2)}%)`
+        `(start: $${PAPER_START.toLocaleString()}  ` +
+        `${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)}  ` +
+        `${totalPct >= 0 ? "+" : ""}${totalPct.toFixed(2)}%)`,
     );
   }
 
   console.log();
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
