@@ -48,7 +48,7 @@ const RISK = {
   riskPerTrade: 0.02, // 2% account risk per trade
   stopLossPct: 0.12, // 12% stop loss
   maxPositions: 3, // max concurrent open positions
-  timeoutH: 48, // close after 48h regardless
+  timeoutH: 72, // close after 72h regardless
 } as const;
 
 const QUEUE_FILE = "signal_queue.json";
