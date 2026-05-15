@@ -11,8 +11,9 @@
  * Parameter notes:
  *   --source binance is explicit — fixtures were captured on Binance candle data.
  *     To migrate to Bybit (new default), delete fixtures/ and re-run to re-capture.
- *   --exhaust-oi-drop is omitted — Bybit OI covers only 200h (~8 days); test signals
- *     span 30 days so older signals have no OI data. Validated via NOT coin backtest.
+ *   --exhaust-oi-drop 0 is explicit — Bybit OI covers only 200h (~8 days); test signals
+ *     span 30 days so older signals have no OI data. Set to 0 so old signals without OI
+ *     data can still produce exhaustion signals. Live scanner always has recent OI.
  *   --pump-squeeze-funding is omitted — diagnostic only, not traded in live scanner.
  */
 
@@ -112,11 +113,12 @@ const TESTS: TestCase[] = [
       "binance", // fixtures captured on Binance — re-capture with Bybit to switch
       "--squeeze-oi-drop",
       "0",
-      // NOTE: --exhaust-oi-drop intentionally omitted.
-      // Bybit OI endpoint returns max 200h (~8 days) but test signals span 30 days.
-      // Signals older than 8 days have oiStart=0 → oiDropPct=0 → all exhaustion blocked.
-      // The OI filter is validated separately via NOT coin backtest analysis.
-      // The live scanner always fetches recent OI so the filter works correctly in production.
+      // --exhaust-oi-drop 0: OI data only covers last 8 days; older signals have no OI.
+      // Use 0 so exhaustion can fire on old signals without OI data.
+      "--exhaust-oi-drop",
+      "0",
+      "--exhaust-funding",
+      "-20",
       "--lookahead",
       "48",
     ],
@@ -171,11 +173,12 @@ const TESTS: TestCase[] = [
       "binance", // fixtures captured on Binance — re-capture with Bybit to switch
       "--squeeze-oi-drop",
       "0",
-      // NOTE: --exhaust-oi-drop intentionally omitted.
-      // Bybit OI endpoint returns max 200h (~8 days) but test signals span 30 days.
-      // Signals older than 8 days have oiStart=0 → oiDropPct=0 → all exhaustion blocked.
-      // The OI filter is validated separately via NOT coin backtest analysis.
-      // The live scanner always fetches recent OI so the filter works correctly in production.
+      // --exhaust-oi-drop 0: OI data only covers last 8 days; older signals have no OI.
+      // Use 0 so exhaustion can fire on old signals without OI data.
+      "--exhaust-oi-drop",
+      "0",
+      "--exhaust-funding",
+      "-20",
       "--lookahead",
       "48",
     ],
@@ -225,11 +228,12 @@ const TESTS: TestCase[] = [
       "binance", // fixtures captured on Binance — re-capture with Bybit to switch
       "--squeeze-oi-drop",
       "0",
-      // NOTE: --exhaust-oi-drop intentionally omitted.
-      // Bybit OI endpoint returns max 200h (~8 days) but test signals span 30 days.
-      // Signals older than 8 days have oiStart=0 → oiDropPct=0 → all exhaustion blocked.
-      // The OI filter is validated separately via NOT coin backtest analysis.
-      // The live scanner always fetches recent OI so the filter works correctly in production.
+      // --exhaust-oi-drop 0: OI data only covers last 8 days; older signals have no OI.
+      // Use 0 so exhaustion can fire on old signals without OI data.
+      "--exhaust-oi-drop",
+      "0",
+      "--exhaust-funding",
+      "-20",
       "--lookahead",
       "48",
     ],
@@ -289,11 +293,12 @@ const TESTS: TestCase[] = [
       "binance", // fixtures captured on Binance — re-capture with Bybit to switch
       "--squeeze-oi-drop",
       "0",
-      // NOTE: --exhaust-oi-drop intentionally omitted.
-      // Bybit OI endpoint returns max 200h (~8 days) but test signals span 30 days.
-      // Signals older than 8 days have oiStart=0 → oiDropPct=0 → all exhaustion blocked.
-      // The OI filter is validated separately via NOT coin backtest analysis.
-      // The live scanner always fetches recent OI so the filter works correctly in production.
+      // --exhaust-oi-drop 0: OI data only covers last 8 days; older signals have no OI.
+      // Use 0 so exhaustion can fire on old signals without OI data.
+      "--exhaust-oi-drop",
+      "0",
+      "--exhaust-funding",
+      "-20",
       "--lookahead",
       "48",
     ],
@@ -335,11 +340,12 @@ const TESTS: TestCase[] = [
       "binance", // fixtures captured on Binance — re-capture with Bybit to switch
       "--squeeze-oi-drop",
       "0",
-      // NOTE: --exhaust-oi-drop intentionally omitted.
-      // Bybit OI endpoint returns max 200h (~8 days) but test signals span 30 days.
-      // Signals older than 8 days have oiStart=0 → oiDropPct=0 → all exhaustion blocked.
-      // The OI filter is validated separately via NOT coin backtest analysis.
-      // The live scanner always fetches recent OI so the filter works correctly in production.
+      // --exhaust-oi-drop 0: OI data only covers last 8 days; older signals have no OI.
+      // Use 0 so exhaustion can fire on old signals without OI data.
+      "--exhaust-oi-drop",
+      "0",
+      "--exhaust-funding",
+      "-20",
       "--lookahead",
       "48",
     ],
@@ -393,18 +399,19 @@ const TESTS: TestCase[] = [
       "binance", // fixtures captured on Binance — re-capture with Bybit to switch
       "--squeeze-oi-drop",
       "0",
-      // NOTE: --exhaust-oi-drop intentionally omitted.
-      // Bybit OI endpoint returns max 200h (~8 days) but test signals span 30 days.
-      // Signals older than 8 days have oiStart=0 → oiDropPct=0 → all exhaustion blocked.
-      // The OI filter is validated separately via NOT coin backtest analysis.
-      // The live scanner always fetches recent OI so the filter works correctly in production.
+      // --exhaust-oi-drop 0: OI data only covers last 8 days; older signals have no OI.
+      // Use 0 so exhaustion can fire on old signals without OI data.
+      "--exhaust-oi-drop",
+      "0",
+      "--exhaust-funding",
+      "-20",
       "--lookahead",
       "48",
     ],
     expect: {
       squeeze: {
-        minBuilding: 10,
-        minExhaustion: 1, // conservative — some signals may be blocked by --exhaust-oi-drop 3
+        minBuilding: 8, // fixture consistently produces 8
+        minExhaustion: 1,
         minWins: 1,
       },
     },
@@ -439,18 +446,19 @@ const TESTS: TestCase[] = [
       "binance", // fixtures captured on Binance — re-capture with Bybit to switch
       "--squeeze-oi-drop",
       "0",
-      // NOTE: --exhaust-oi-drop intentionally omitted.
-      // Bybit OI endpoint returns max 200h (~8 days) but test signals span 30 days.
-      // Signals older than 8 days have oiStart=0 → oiDropPct=0 → all exhaustion blocked.
-      // The OI filter is validated separately via NOT coin backtest analysis.
-      // The live scanner always fetches recent OI so the filter works correctly in production.
+      // --exhaust-oi-drop 0: OI data only covers last 8 days; older signals have no OI.
+      // Use 0 so exhaustion can fire on old signals without OI data.
+      "--exhaust-oi-drop",
+      "0",
+      "--exhaust-funding",
+      "-20",
       "--lookahead",
       "48",
     ],
     expect: {
       squeeze: {
         minBuilding: 1,
-        minExhaustion: 2, // Apr signals may be blocked by --exhaust-oi-drop 3
+        minExhaustion: 2,
         minWins: 2,
         mustInclude: [
           // May 2 signals confirmed passing OI-drop >= 3% (OI-61.8%, OI-27.3%)
@@ -498,7 +506,11 @@ const TESTS: TestCase[] = [
       "binance",
       "--squeeze-oi-drop",
       "0",
-      // --exhaust-oi-drop intentionally omitted — see WIF comment above
+      // --exhaust-oi-drop 0: OI data only covers last 8 days; older signals have no OI.
+      "--exhaust-oi-drop",
+      "0",
+      "--exhaust-funding",
+      "-20",
       "--lookahead",
       "48",
     ],

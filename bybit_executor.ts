@@ -342,6 +342,26 @@ async function fetchLivePositionSize(coin: string): Promise<number> {
   } // -1 = unknown, don't close
 }
 
+/** Fetch the actual fill price for the most recent close from Bybit order history */
+async function fetchActualClosePrice(
+  coin: string,
+  fallback: number,
+): Promise<number> {
+  if (IS_PAPER) return fallback;
+  try {
+    const res = await client.getClosedPnL({
+      category: "linear",
+      symbol: `${coin}USDT`,
+      limit: 1,
+    });
+    const record = res.result?.list?.[0];
+    if (record?.avgExitPrice) return parseFloat(record.avgExitPrice);
+    return fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 // ─── Position management ───────────────────────────────────────────────────────
 async function managePositions(store: BybitPositionStore): Promise<void> {
   const nowMs = Date.now();
@@ -371,7 +391,9 @@ async function managePositions(store: BybitPositionStore): Promise<void> {
 
     if (stopHit) {
       closeReason = "stop";
-      closePx = IS_PAPER ? pos.stopLossPx : currentPx;
+      closePx = IS_PAPER
+        ? pos.stopLossPx
+        : await fetchActualClosePrice(coin, currentPx); // actual fill, not current price
     } else if (ageH >= RISK.timeoutH) {
       closeReason = "timeout";
       if (!IS_PAPER) await closePosition(coin, "timeout");

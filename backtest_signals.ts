@@ -2582,21 +2582,21 @@ function parseArgs(): Args {
       .map((c) => c.trim().toUpperCase())
       .filter(Boolean),
     days: parseInt(g("--days", "90"), 10),
-    lookaheadHours: parseInt(g("--lookahead", "24"), 10),
-    fundingAprThreshold: parseFloat(g("--threshold", "50")),
-    minPositiveReadings: parseInt(g("--min-positive", "6"), 10),
-    minOiChangePct: parseFloat(g("--min-oi", "5")),
-    maxPriceChangePct: parseFloat(g("--max-price", "0.5")),
+    lookaheadHours: parseInt(g("--lookahead", "48"), 10), // validated: 48h
+    fundingAprThreshold: parseFloat(g("--threshold", "10")), // validated: 10%
+    minPositiveReadings: parseInt(g("--min-positive", "2"), 10), // validated: 2
+    minOiChangePct: parseFloat(g("--min-oi", "2")), // validated: 2%
+    maxPriceChangePct: parseFloat(g("--max-price", "2")), // validated: 2%
     pumpMinPct: parseFloat(g("--pump-pct", "19")),
-    pumpMinVolMult: parseFloat(g("--pump-vol", "8")),
+    pumpMinVolMult: parseFloat(g("--pump-vol", "5")), // validated: 5×
     pumpMinRsi: parseFloat(g("--pump-rsi", "88")),
-    pumpMinFundingApr: parseFloat(g("--pump-funding", "50")),
+    pumpMinFundingApr: parseFloat(g("--pump-funding", "0")), // validated: 0%
     squeezeMinPct: parseFloat(g("--squeeze-pct", "20")),
-    squeezeHours: parseInt(g("--squeeze-hours", "6"), 10),
-    squeezeMaxFundingApr: parseFloat(g("--squeeze-funding", "-10")),
+    squeezeHours: parseInt(g("--squeeze-hours", "10"), 10), // validated: 10h
+    squeezeMaxFundingApr: parseFloat(g("--squeeze-funding", "-100")), // validated: -100%
     exhaustMaxFundingApr: parseFloat(g("--exhaust-funding", "-20")),
-    exhaustMinOiDrop: parseFloat(g("--exhaust-oi-drop", "0")),
-    squeezeMinOiDrop: parseFloat(g("--squeeze-oi-drop", "3")),
+    exhaustMinOiDrop: parseFloat(g("--exhaust-oi-drop", "3")), // validated: 3%
+    squeezeMinOiDrop: parseFloat(g("--squeeze-oi-drop", "0")), // validated: 0%
     dataSource: g("--source", "bybit") as "bybit" | "binance" | "hl",
     trendFilter: !a.includes("--no-trend-filter"),
     trendDays7Pct: parseFloat(g("--trend-7d", "30")),
