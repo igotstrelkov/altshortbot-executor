@@ -1,44 +1,35 @@
 /**
  * simulate_gates.ts
  * =================
- * Verifies that the BUILDING queue gates correctly queue/block known signals.
- * Uses hardcoded signal data (OI, pump tops) from prior backtest analysis —
- * no API calls, runs in <1s, fully deterministic.
+ * Verifies BUILDING queue gates correctly queue/block known signals.
+ * No API calls, runs <1s, fully deterministic.
  *
- * Run before every deploy:
- *   npx tsx simulate_gates.ts
+ * Run before every deploy:  npx tsx simulate_gates.ts
  *
- * To add a new signal:
- *   1. Run the backtest for the coin and note the oiDropPct from the signal line
- *   2. Check if a PUMP_TOP fired within PUMP_TOP_COOLDOWN_H hours before
- *   3. Add an entry below with expectBlocked set correctly
- *
- * Constants are imported from live_scanner.ts — no manual sync needed.
+ * OI gate history:
+ *   BUILDING_OI_RISING_MAX was REMOVED 2026-05-16 after backtest showed
+ *   all 4 OI-gate-blocked signals were profitable:
+ *     SOLV  May-12 (-182.9% OI, -447% APR)  → -14.53% PUMP+DUMP ✅
+ *     SOLV  May-12 (-172.5% OI, -997% APR)  → -12.91% DROPPED   ✅
+ *     IRYS  May-15 (-280%   OI, -1632% APR) → -13.01% PUMP+DUMP ✅
+ *     STORJ May-16 (-433%   OI, -1596% APR) → -13.57% DROPPED   ✅
+ *   The anchor signal ("SOLV blocked correctly") was in fact profitable.
+ *   Only two gates remain: funding threshold + pump-top cooldown.
  */
 
-import {
-  FUNDING_THRESHOLD,
-  BUILDING_OI_RISING_MAX as OI_RISING_MAX,
-  BUILDING_OI_RISING_MAX_REFIRE as OI_RISING_MAX_REFIRE,
-  PUMP_TOP_COOLDOWN_H,
-} from "./live_scanner.ts";
+import { FUNDING_THRESHOLD, PUMP_TOP_COOLDOWN_H } from "./live_scanner.ts";
 
-// ── Signal data ───────────────────────────────────────────────────────────────
-// oiDropPct:        from backtest output (e.g. "OI--182.9%" → -182.9)
-// pumpTopHoursAgo:  hours between preceding PUMP_TOP and this signal (null = none)
-// isRefire:         true if funding 2× more extreme than prior BUILDING in same wave
-// expectBlocked:    true = gate should block; false = gate should queue (default)
 const SIGNALS: Array<{
   coin: string;
   firedAt: string;
   fundingApr: number;
-  oiDropPct: number;
+  oiDropPct: number; // kept for documentation — no longer gates
   pumpTopHoursAgo: number | null;
   isRefire?: boolean;
   result: string;
   expectBlocked?: boolean;
 }> = [
-  // ── May 10 batch — all 6 queued, all profitable ───────────────────────────
+  // May 10 batch — all queued, all profitable
   {
     coin: "RAVE",
     firedAt: "2026-05-10 00:12",
@@ -88,21 +79,15 @@ const SIGNALS: Array<{
     result: "+1.36%",
   },
 
-  // ── SOLV May 12 — OI gate in action ──────────────────────────────────────
-  // First fire: OI rising strongly (-182.9%) → blocked (price had 5%+ excursion before reversing)
+  // SOLV May 12 — previously blocked by OI gate; backtest confirmed both profitable
   {
     coin: "SOLV",
     firedAt: "2026-05-12 12:00",
     fundingApr: -447.1,
     oiDropPct: -182.9,
     pumpTopHoursAgo: null,
-    result:
-      "PUMP+DUMP (price peaked +5% before reversing — stop would have hit intraday)",
-    expectBlocked: true,
+    result: "PUMP+DUMP -14.53% (max +5.23% adverse — within 12% stop)",
   },
-
-  // Re-fire: funding 2× more extreme (-997% vs -447%), OI slightly less extreme (-172.5%)
-  // → permissive -200% threshold for re-fires → queued, immediate DROPPED -6.25%
   {
     coin: "SOLV",
     firedAt: "2026-05-12 16:00",
@@ -110,56 +95,77 @@ const SIGNALS: Array<{
     oiDropPct: -172.5,
     pumpTopHoursAgo: null,
     isRefire: true,
-    result: "DROPPED -6.25% (max +0.27% adverse — immediate reversal)",
+    result: "DROPPED -12.91% (max +0.27% adverse — immediate reversal)",
   },
+
+  // MBOX May 13
   {
     coin: "MBOX",
     firedAt: "2026-05-13 12:00",
     fundingApr: -1354.5,
     oiDropPct: -133.0,
     pumpTopHoursAgo: null,
-    isRefire: false,
-    result: "+30%",
+    result: "DROPPED -19.23%",
+  },
+
+  // IRYS May 15 — previously blocked by OI gate (OI -280%)
+  {
+    coin: "IRYS",
+    firedAt: "2026-05-15 16:00",
+    fundingApr: -1631.6,
+    oiDropPct: -280.0,
+    pumpTopHoursAgo: null,
+    result: "PUMP+DUMP -13.01% (max +8.45% adverse — within 12% stop)",
+  },
+
+  // STORJ May 16 — previously blocked by OI gate (OI -433%)
+  {
+    coin: "STORJ",
+    firedAt: "2026-05-16 00:00",
+    fundingApr: -1596.3,
+    oiDropPct: -433.1,
+    pumpTopHoursAgo: null,
+    result: "DROPPED -13.57% (max 0% adverse — straight down)",
+  },
+
+  // Pump-top cooldown — PUMP_TOP_COOLDOWN_H is currently 0 (disabled),
+  // so pump tops never block. Test confirms queued regardless of pump recency.
+  {
+    coin: "TEST_PUMP_RECENT",
+    firedAt: "2026-05-01 12:00",
+    fundingApr: -500.0,
+    oiDropPct: 0.0,
+    pumpTopHoursAgo: 1.0,
+    result: "queued — pump-top cooldown is disabled (PUMP_TOP_COOLDOWN_H=0)",
   },
 ];
 
-// ── Gate logic ────────────────────────────────────────────────────────────────
 function applyGates(sig: (typeof SIGNALS)[0]): {
   g1: boolean;
   g2: boolean;
-  g3: boolean;
   wouldQueue: boolean;
-  oiThreshold: number;
 } {
-  const oiThreshold = sig.isRefire ? OI_RISING_MAX_REFIRE : OI_RISING_MAX;
   const g1 = sig.fundingApr <= FUNDING_THRESHOLD;
-  const g2 = sig.oiDropPct >= oiThreshold;
-  const g3 =
+  const g2 =
     sig.pumpTopHoursAgo === null || sig.pumpTopHoursAgo >= PUMP_TOP_COOLDOWN_H;
-  return { g1, g2, g3, wouldQueue: g1 && g2 && g3, oiThreshold };
+  return { g1, g2, wouldQueue: g1 && g2 };
 }
 
-// ── Runner ────────────────────────────────────────────────────────────────────
 function main() {
   console.log("\nGate Simulation — would these signals be queued?");
   console.log(
-    `Thresholds: funding ≤ ${FUNDING_THRESHOLD}%  |  OI ≥ ${OI_RISING_MAX}% (first) / ${OI_RISING_MAX_REFIRE}% (re-fire)  |  pump top cooldown: ${PUMP_TOP_COOLDOWN_H}h`,
+    `Thresholds: funding ≤ ${FUNDING_THRESHOLD}%  |  pump-top cooldown: ${PUMP_TOP_COOLDOWN_H}h`,
   );
-  console.log("═".repeat(80));
+  console.log(
+    "OI gate: REMOVED — all historically-blocked signals were profitable",
+  );
+  console.log("═".repeat(78));
 
-  let queued = 0,
-    failures = 0;
-  const expectedQueued = SIGNALS.filter((s) => !s.expectBlocked).length;
-  const expectedBlocked = SIGNALS.filter((s) => s.expectBlocked).length;
-  let actualBlocked = 0;
-
+  let failures = 0;
   for (const sig of SIGNALS) {
-    const { g1, g2, g3, wouldQueue, oiThreshold } = applyGates(sig);
+    const { g1, g2, wouldQueue } = applyGates(sig);
     const expectBlocked = sig.expectBlocked === true;
     const passed = expectBlocked ? !wouldQueue : wouldQueue;
-
-    if (wouldQueue) queued++;
-    if (!wouldQueue) actualBlocked++;
     if (!passed) failures++;
 
     const status = wouldQueue ? "✅ QUEUED " : "🚫 BLOCKED";
@@ -170,41 +176,32 @@ function main() {
       : expectBlocked
         ? "❌ SHOULD BE BLOCKED"
         : "❌ SHOULD BE QUEUED";
-
+    const oiNote =
+      sig.oiDropPct < -100
+        ? ` [OI ${sig.oiDropPct.toFixed(1)}% — old gate would block]`
+        : "";
     const refireTag = sig.isRefire ? " [re-fire]" : "";
-    console.log(`\n${sig.coin.padEnd(8)} ${sig.firedAt}${refireTag}`);
+
+    console.log(`\n${sig.coin.padEnd(16)} ${sig.firedAt}${refireTag}`);
     console.log(`  ${status}  ${assertion}`);
     console.log(
-      `  Funding:  ${sig.fundingApr.toFixed(0)}% APR        → Gate 1: ${g1 ? "✅" : "❌ fail (above threshold)"}`,
+      `  Funding:  ${sig.fundingApr.toFixed(0)}% APR  → Gate 1: ${g1 ? "✅" : "❌ above threshold"}`,
     );
     console.log(
-      `  OI drop:  ${sig.oiDropPct.toFixed(1)}%  (≥ ${oiThreshold}%)  → Gate 2: ${g2 ? "✅" : `❌ blocked (OI rose ${Math.abs(sig.oiDropPct).toFixed(1)}%)`}`,
-    );
-    const pumpStr =
-      sig.pumpTopHoursAgo !== null ? `${sig.pumpTopHoursAgo}h before` : "none";
-    console.log(
-      `  Pump top: ${pumpStr.padEnd(12)}           → Gate 3: ${g3 ? "✅" : `❌ within ${PUMP_TOP_COOLDOWN_H}h cooldown`}`,
+      `  Pump top: ${(sig.pumpTopHoursAgo !== null ? `${sig.pumpTopHoursAgo}h ago` : "none").padEnd(10)}  → Gate 2: ${g2 ? "✅" : `❌ within ${PUMP_TOP_COOLDOWN_H}h cooldown`}${oiNote}`,
     );
     console.log(`  Result:   ${sig.result}`);
   }
 
-  console.log(`\n${"═".repeat(80)}`);
-  console.log(
-    `Queued:  ${queued}/${expectedQueued} expected-queued signals passed`,
-  );
-  console.log(
-    `Blocked: ${actualBlocked}/${expectedBlocked} expected-blocked signals confirmed`,
-  );
-
+  console.log(`\n${"═".repeat(78)}`);
   if (failures > 0) {
     console.log(
       `\n❌ ${failures} assertion(s) failed — gate thresholds need review`,
     );
     process.exit(1);
   } else {
-    console.log(`\n✅ All ${SIGNALS.length} assertions passed`);
+    console.log(`\n✅ All ${SIGNALS.length} assertions passed\n`);
   }
-  console.log();
 }
 
 main();

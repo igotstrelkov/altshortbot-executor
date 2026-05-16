@@ -113,11 +113,16 @@ const PUMP_TOP_COOLDOWN_H = 0;
 //   SOLV    (-182.9% OI) blocked correctly       → threshold must be > -182.9%
 //   -150% sits cleanly between both data points.
 const FUNDING_THRESHOLD = -200; // BUILDING must be ≤ this APR to queue
-const BUILDING_OI_RISING_MAX = -150;
-// Re-fires already require 2× more extreme funding — higher conviction entry.
-// Evidence: SOLV May-12 16:00 re-fire at -997% APR (OI -172.5%) dropped
-// immediately (+0.27% max adverse); first-fire (OI -182.9%) had 5%+ excursion.
-const BUILDING_OI_RISING_MAX_REFIRE = -200;
+// OI gate REMOVED — data showed all OI-gate-blocked signals were profitable:
+//   SOLV May-12 (-182.9% OI, -447% APR)  → -14.53%  PUMP+DUMP  ✅
+//   SOLV May-12 (-172.5% OI, -997% APR)  → -12.91%  DROPPED    ✅
+//   IRYS        (-280%   OI, -1632% APR) → -13.01%  PUMP+DUMP  ✅
+//   STORJ       (-433%   OI, -1596% APR) → -13.57%  DROPPED    ✅
+// The gate blocked 4/4 profitable signals and the only stop-out (AIGENSYN
+// first entry OI -138%) had PASSED the gate. Gate was calibrated on wrong
+// data — SOLV was documented as "SQUEEZED" but backtest showed profitable.
+const BUILDING_OI_RISING_MAX = -Infinity; // disabled — see above
+const BUILDING_OI_RISING_MAX_REFIRE = -Infinity; // disabled — see above
 const MIN_EXHAUSTION_GAP_H = 6; // Exhaustion re-fire minimum gap (hours)
 const STATE_FILE = "scanner_state.json";
 const BB_BASE = "https://api.bybit.com";
@@ -876,25 +881,13 @@ function formatAlert(alert: Alert): string {
   if (alert.type === "EXHAUSTION" && alert.confidence === "HIGH")
     lines.push("", `📐 Short entry — stop at -12% | target -15% to -40%`);
   if (alert.type === "BUILDING") {
-    const oiThreshold = alert.isRefire
-      ? BUILDING_OI_RISING_MAX_REFIRE
-      : BUILDING_OI_RISING_MAX;
-    const oiRising = (alert.oiDropPct ?? 0) < oiThreshold;
     const pumpCooldown = alert.recentPumpTop === true;
-    if (alert.fundingApr <= -200 && !oiRising && !pumpCooldown) {
+    if (alert.fundingApr <= -200 && !pumpCooldown) {
       lines.push("", `📐 Short entry — extreme funding squeeze (auto-queued)`);
     } else if (alert.fundingApr <= -200 && pumpCooldown) {
       lines.push(
         "",
         `⚠️ Pump top fired recently — squeeze still accelerating (not queued)`,
-      );
-    } else if (alert.fundingApr <= -200 && oiRising) {
-      const refireNote = alert.isRefire
-        ? " (re-fire: -200% threshold applied)"
-        : "";
-      lines.push(
-        "",
-        `⚠️ Extreme funding but OI rising — squeeze still building (not queued)${refireNote}`,
       );
     } else {
       lines.push("", `⏳ Do NOT short yet — await exhaustion signal`);
@@ -1058,12 +1051,8 @@ async function main(): Promise<void> {
       const isExtremeBuilding =
         alert.type === "BUILDING" &&
         alert.fundingApr <= -200 &&
-        // OI gate: re-fires use a more permissive threshold (-200%) since
-        // 2× funding intensity is already a strong quality signal.
-        (alert.oiDropPct ?? 0) >=
-          (alert.isRefire
-            ? BUILDING_OI_RISING_MAX_REFIRE
-            : BUILDING_OI_RISING_MAX) &&
+        // OI gate removed — all 4 OI-blocked signals (SOLV×2, IRYS, STORJ)
+        // were profitable; the gate was calibrated on incorrect SOLV data.
         // Skip if a PUMP_TOP fired recently — squeeze is still accelerating
         !alert.recentPumpTop;
 
@@ -1119,8 +1108,7 @@ if (process.argv[1] === __filename) {
 }
 
 export {
-  BUILDING_OI_RISING_MAX,
-  BUILDING_OI_RISING_MAX_REFIRE,
+  // OI gate removed — BUILDING_OI_RISING_MAX no longer enforced
   buildMergedFundingByHour,
   defaultState,
   FUNDING_THRESHOLD,

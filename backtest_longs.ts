@@ -23,6 +23,8 @@
  *   --min-positive Min positive funding readings in 8h window (default: 2)
  */
 
+import { writeFileSync } from "fs";
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 const BB_BASE = "https://api.bybit.com";
 const BN_BASE = "https://fapi.binance.com";
@@ -54,6 +56,19 @@ interface Signal {
   funding: number;
   oiChange4h: number;
   outcome?: SignalOutcome;
+}
+
+interface CoinChartData {
+  coin: string;
+  labels: string[];
+  prices: (number | null)[];
+  funding: (number | null)[];
+  signals: {
+    idx: number;
+    entry: number;
+    stop: number;
+    outcome: SignalOutcome;
+  }[];
 }
 
 interface SignalOutcome {
@@ -348,13 +363,12 @@ function detectLongSignals(
   const COOL = 4 * HOUR; // 4h cooldown between signals — matches backtest_signals.ts
   const sigSet = new Set<string>();
 
-  // Build hourly lookup maps (floor to hour, matching backtest_signals.ts)
-  // Build hour-aligned lookups (floor to hour, matching backtest_signals.ts)
+  // Build hour-aligned lookups
   const oiByHour = new Map<number, number>();
   for (const r of oiRecords) oiByHour.set(floorH(r.timeMs), r.oiUsd);
 
-  const priceByHour = new Map<number, number>();
-  for (const c of candles) priceByHour.set(floorH(c.t), c.c);
+  const priceByHourLocal = new Map<number, number>();
+  for (const c of candles) priceByHourLocal.set(floorH(c.t), c.c);
 
   // Use same allHours approach as backtest_signals.ts — iterate fundingMap hours
   const allHours = [...fundingMap.keys()].sort((a, b) => a - b);
@@ -365,7 +379,7 @@ function detectLongSignals(
     pSeries: number[] = [];
 
   for (const ts of allHours) {
-    const price = priceByHour.get(ts);
+    const price = priceByHourLocal.get(ts);
     if (!price) continue;
     const fRate = fundingMap.get(ts) ?? 0;
 
@@ -465,8 +479,144 @@ function trackOutcome(signal: Signal, candles: Candle[]): SignalOutcome {
   };
 }
 
+// ─── Chart generation ──────────────────────────────────────────────────────────
+function generateChartHTML(
+  charts: CoinChartData[],
+  cfg: {
+    coins: string[];
+    days: number;
+    lookahead: number;
+    threshold: number;
+    stopLoss: number;
+  },
+): string {
+  const sv = (n: number) => (n >= 0 ? "+" : "") + n.toFixed(2);
+  const colour = (o: SignalOutcome) =>
+    o.stopHit
+      ? "#ef4444"
+      : o.final > 2
+        ? "#22c55e"
+        : o.final < -2
+          ? "#f97316"
+          : "#94a3b8";
+  const lbl = (o: SignalOutcome) =>
+    o.stopHit
+      ? "STOPPED"
+      : o.final > 2
+        ? "WIN"
+        : o.final < -2
+          ? "DROPPED"
+          : "NEUTRAL";
+
+  const sections = charts
+    .map(({ coin, signals }) => {
+      const wins = signals.filter(
+        (s) => !s.outcome.stopHit && s.outcome.final > 2,
+      ).length;
+      const stops = signals.filter((s) => s.outcome.stopHit).length;
+      const avgF = signals.length
+        ? signals.reduce((a, s) => a + s.outcome.final, 0) / signals.length
+        : 0;
+      return `
+<section id="s-${coin}">
+  <h2>📈 ${coin} <span class="tag">${signals.length} signal${signals.length !== 1 ? "s" : ""}</span></h2>
+  <div class="grid4">
+    <div class="sc"><div class="sv">${signals.length}</div><div class="sl">Signals</div></div>
+    <div class="sc green"><div class="sv">${wins}</div><div class="sl">Wins</div></div>
+    <div class="sc red"><div class="sv">${stops}</div><div class="sl">Stop-outs</div></div>
+    <div class="sc"><div class="sv">${signals.length ? sv(avgF) + "%" : "—"}</div><div class="sl">Avg ${cfg.lookahead}h</div></div>
+  </div>
+  ${
+    signals.length === 0
+      ? `<div class="banner">No long signals — funding stayed below +${cfg.threshold}% APR.</div>`
+      : ""
+  }
+  <div class="cw big"><canvas id="p-${coin}"></canvas></div>
+  <div class="cw med"><canvas id="f-${coin}"></canvas></div>
+  ${signals.length ? `<h3>Signal details</h3><div class="dgrid" id="d-${coin}"></div>` : ""}
+</section>`;
+    })
+    .join("\n");
+
+  const dataJson = JSON.stringify(charts);
+
+  return `<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8"><title>Long Bot Backtest — ${cfg.coins.join(", ")}</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"><\/script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"><\/script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0f172a;color:#e2e8f0;font-family:-apple-system,sans-serif;padding:24px}
+h1{font-size:1.4rem;font-weight:700;margin-bottom:4px}
+.sub{color:#64748b;font-size:.88rem;margin-bottom:24px}
+h2{font-size:1.2rem;font-weight:600;margin:0 0 14px;display:flex;align-items:center;gap:10px}
+h3{color:#94a3b8;font-size:.9rem;margin:20px 0 10px}
+.tag{background:#1e293b;color:#94a3b8;font-size:.76rem;padding:2px 10px;border-radius:99px}
+section{margin-bottom:56px}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}
+.sc{background:#1e293b;border-radius:8px;padding:12px;border:1px solid #334155}
+.sc.green{border-color:#22c55e44}.sc.red{border-color:#ef444444}
+.sv{font-size:1.3rem;font-weight:700}.sl{font-size:.72rem;color:#64748b;margin-top:2px}
+.cw{background:#1e293b;border-radius:10px;padding:14px;margin-bottom:10px;border:1px solid #334155}
+.cw.big{height:280px}.cw.med{height:150px}
+canvas{display:block;width:100%!important;height:100%!important}
+.dgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(400px,1fr));gap:12px}
+.dcard{background:#1e293b;border-radius:8px;padding:12px;border:1px solid #334155;border-top:3px solid}
+.dh{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.dlbl{font-size:.7rem;font-weight:700;padding:2px 8px;border-radius:99px;color:#0f172a}
+.ds{font-size:.77rem;color:#64748b;display:flex;gap:10px;flex-wrap:wrap}
+.ds strong{color:#e2e8f0}.g{color:#22c55e!important}.r{color:#ef4444!important}
+.banner{background:#1e3a5f;border:1px solid #3b82f6;border-radius:8px;padding:12px;margin-bottom:14px;font-size:.86rem;color:#93c5fd}
+.legend{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:20px}
+.li{display:flex;align-items:center;gap:6px;font-size:.8rem;color:#94a3b8}
+.ld{width:11px;height:11px;border-radius:3px}
+</style></head><body>
+<h1>Long Bot Backtest</h1>
+<p class="sub">${cfg.coins.join(", ")} · Last ${cfg.days}d · ${cfg.lookahead}h lookahead · Funding &gt; +${cfg.threshold}% APR · Stop -${cfg.stopLoss}%</p>
+<div class="legend">
+  <div class="li"><div class="ld" style="background:#22c55e"></div>WIN ✅</div>
+  <div class="li"><div class="ld" style="background:#f97316"></div>DROPPED ❌</div>
+  <div class="li"><div class="ld" style="background:#ef4444"></div>STOPPED 🛑</div>
+  <div class="li"><div class="ld" style="background:#94a3b8"></div>NEUTRAL 😐</div>
+</div>
+${sections}
+<script>
+const DATA=${dataJson};
+const fv=n=>(n>=0?"+":"")+n.toFixed(2);
+const col=o=>o.stopHit?"#ef4444":o.final>2?"#22c55e":o.final<-2?"#f97316":"#94a3b8";
+const lbl=o=>o.stopHit?"STOPPED":o.final>2?"WIN":o.final<-2?"DROPPED":"NEUTRAL";
+DATA.forEach(({coin,labels,prices,funding,signals})=>{
+  const pc=document.getElementById("p-"+coin);
+  if(pc){
+    const ann={};
+    signals.forEach((s,i)=>{
+      if(s.idx<0)return;
+      const c=col(s.outcome);
+      ann["e"+i]={type:"point",xMin:s.idx,xMax:s.idx,yMin:s.entry,yMax:s.entry,radius:6,borderColor:c,backgroundColor:c+"66"};
+      ann["s"+i]={type:"line",xMin:s.idx,xMax:Math.min(s.idx+${LOOKAHEAD},labels.length-1),yMin:s.stop,yMax:s.stop,borderColor:"#ef444466",borderWidth:1,borderDash:[4,4]};
+    });
+    new Chart(pc,{type:"line",data:{labels,datasets:[{label:"Price",data:prices,borderColor:"#38bdf8",borderWidth:1.5,pointRadius:0,tension:.2,fill:false}]},options:{responsive:true,maintainAspectRatio:false,animation:false,plugins:{legend:{display:false},annotation:{annotations:ann}},scales:{x:{ticks:{maxTicksLimit:12,color:"#475569",font:{size:10}},grid:{color:"#1e293b"}},y:{ticks:{color:"#475569",font:{size:10}},grid:{color:"#334155"}}}}});
+  }
+  const fc=document.getElementById("f-"+coin);
+  if(fc){
+    const bg=funding.map(v=>v==null?null:v>0?"#22c55e44":"#ef444444");
+    new Chart(fc,{type:"bar",data:{labels,datasets:[{label:"Funding APR %",data:funding,backgroundColor:bg,borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,animation:false,plugins:{legend:{display:false}},scales:{x:{ticks:{maxTicksLimit:12,color:"#475569",font:{size:10}},grid:{color:"#1e293b"}},y:{ticks:{color:"#475569",font:{size:10}},grid:{color:"#334155"}}}}});
+  }
+  const dg=document.getElementById("d-"+coin);
+  if(!dg)return;
+  signals.forEach(s=>{
+    const o=s.outcome,c=col(o),l=lbl(o);
+    const fc2=o.final>0?"g":"r";dg.innerHTML+="<div class='dcard' style='border-top-color:"+c+"'>"+"<div class='dh'><span style='font-size:.83rem;color:#94a3b8'>"+( labels[s.idx]||"")+"</span>"+"<span class='dlbl' style='background:"+c+"'>"+l+"</span></div>"+"<div class='ds'>"+"<span>Entry <strong>$"+s.entry.toFixed(6)+"</strong></span>"+"<span>Stop <strong class='r'>$"+s.stop.toFixed(6)+"</strong></span>"+"<span>Max <strong class='g'>"+fv(o.maxUp)+"%</strong></span>"+"<span>Drop <strong class='r'>-"+o.maxDown.toFixed(2)+"%</strong></span>"+"<span>Final <strong class='"+fc2+"'>"+fv(o.final)+"%</strong></span>"+"<span>3x <strong class='"+fc2+"'>"+fv(o.final*3)+"%</strong></span>"+"</div></div>";
+  });
+});
+<\/script></body></html>`;
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
-async function runCoin(coin: string): Promise<Signal[]> {
+async function runCoin(
+  coin: string,
+): Promise<{ signals: Signal[]; chartData: CoinChartData }> {
   const nowMs = Date.now();
   const endMs = Math.floor(nowMs / HOUR) * HOUR; // align to hour boundary
   const startMs = endMs - DAYS * 24 * HOUR; // already aligned
@@ -481,7 +631,7 @@ async function runCoin(coin: string): Promise<Signal[]> {
     fetchBybitOI(coin, oiFetchFrom, endMs),
   ]);
 
-  // Build priceByHour for OI USD conversion (Bybit OI is in base coin units)
+  // Build priceByHour for OI USD conversion and chart display
   const priceByHour = new Map<number, number>();
   for (const c of candles) priceByHour.set(floorH(c.t), c.c);
   const oiRecords = applyPriceToBybitOI(rawOI, priceByHour);
@@ -541,7 +691,31 @@ async function runCoin(coin: string): Promise<Signal[]> {
     );
   }
 
-  return withOutcome;
+  // Build chart data
+  const allHours = [...fundingMap.keys()]
+    .sort((a, b) => a - b)
+    .filter((h) => h >= startMs);
+  const chartData: CoinChartData = {
+    coin,
+    labels: allHours.map((h) =>
+      new Date(h).toISOString().slice(5, 16).replace("T", " "),
+    ),
+    prices: allHours.map((h) => priceByHour.get(h) ?? null),
+    funding: allHours.map((h) => {
+      const r = fundingMap.get(h);
+      return r != null ? r * 8760 * 100 : null;
+    }),
+    signals: withOutcome
+      .filter((s) => s.outcome)
+      .map((s) => ({
+        idx: allHours.indexOf(s.timeMs),
+        entry: s.entry,
+        stop: s.entry * (1 - STOP_LOSS / 100),
+        outcome: s.outcome!,
+      }))
+      .filter((s) => s.idx !== -1),
+  };
+  return { signals: withOutcome, chartData };
 }
 
 async function main() {
@@ -555,9 +729,11 @@ async function main() {
   console.log(`Stop loss:  -${STOP_LOSS}% from entry\n`);
 
   const allSignals: Signal[] = [];
+  const allChartData: CoinChartData[] = [];
   for (const coin of COINS) {
-    const signals = await runCoin(coin);
+    const { signals, chartData } = await runCoin(coin);
     allSignals.push(...signals);
+    allChartData.push(chartData);
     await sleep(200);
   }
 
@@ -595,6 +771,18 @@ async function main() {
     );
   }
 
+  // Generate chart
+  if (CHART) {
+    const html = generateChartHTML(allChartData, {
+      coins: COINS,
+      days: DAYS,
+      lookahead: LOOKAHEAD,
+      threshold: THRESHOLD,
+      stopLoss: STOP_LOSS,
+    });
+    writeFileSync("backtest_longs_chart.html", html, "utf8");
+    console.log("  Chart saved → backtest_longs_chart.html\n");
+  }
   console.log();
 }
 

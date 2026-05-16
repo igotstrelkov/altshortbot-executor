@@ -82,5 +82,42 @@ module.exports = {
         // BYBIT_TESTNET:     "1",        // uncomment to use testnet
       },
     },
+    // ── Long Scanner — DISABLED until market turns bullish ──────────────────
+    // Enable when scan_positive_funding.ts shows > 5 coins above +200% APR
+    {
+      name: "altshortbot-long-scanner",
+      script: "npx",
+      args: "tsx long_scanner.ts",
+      cron_restart: "*/15 * * * *",
+      autorestart: false,
+      out_file: "logs/long-scanner.log",
+      error_file: "logs/long-scanner-error.log",
+      time: true,
+      env: {
+        NODE_ENV: "production",
+        TELEGRAM_TOKEN: process.env.TELEGRAM_TOKEN ?? "",
+        TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID ?? "",
+      },
+    },
+
+    // ── Long Executor — DISABLED until market turns bullish ──────────────────
+    {
+      name: "altshortbot-long-executor",
+      script: "npx",
+      args: "tsx long_executor.ts --paper", // remove --paper to go live
+      cron_restart: "*/5 * * * *",
+      autorestart: false,
+      out_file: "logs/long-executor.log",
+      error_file: "logs/long-executor-error.log",
+      time: true,
+      env: {
+        NODE_ENV: "production",
+        TELEGRAM_TOKEN: process.env.TELEGRAM_TOKEN ?? "",
+        TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID ?? "",
+        BYBIT_API_KEY: process.env.BYBIT_API_KEY ?? "",
+        BYBIT_API_SECRET: process.env.BYBIT_API_SECRET ?? "",
+        BYBIT_PAPER_ACCOUNT: "10000",
+      },
+    },
   ],
 };
