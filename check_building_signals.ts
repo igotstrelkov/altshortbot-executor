@@ -196,143 +196,142 @@ async function main() {
   const expired = signals.filter((s) => now - s.firedAtMs >= window);
   const toShow = SHOW_ALL ? signals : active;
 
-  if (!toShow.length) {
-    console.log(`No ${SHOW_ALL ? "" : `active (<${LOOKAHEAD_H}h) `}signals.`);
-    return;
-  }
-
   const coins = Array.from(new Set(toShow.map((s) => s.coin)));
   const markPrices = await fetchMarkPrices(coins);
 
-  console.log(`\nStrategy B — BUILDING Signal Monitor`);
-  console.log(
-    `${new Date().toISOString()}  |  window: ${LOOKAHEAD_H}h  |  prices: Bybit`,
-  );
+  if (!toShow.length) {
+    console.log(`No ${SHOW_ALL ? "" : `active (<${LOOKAHEAD_H}h) `}signals.`);
+  } else {
+    console.log(`\nStrategy B — BUILDING Signal Monitor`);
+    console.log(
+      `${new Date().toISOString()}  |  window: ${LOOKAHEAD_H}h  |  prices: Bybit`,
+    );
 
-  // Active
-  if (active.length) {
-    console.log(`\nActive (${active.length})`);
-    console.log(HEADER);
-    console.log(DIVIDER);
+    // Active
+    if (active.length) {
+      console.log(`\nActive (${active.length})`);
+      console.log(HEADER);
+      console.log(DIVIDER);
 
-    let totalPnl = 0,
-      wins = 0,
-      confirmed = 0;
+      let totalPnl = 0,
+        wins = 0,
+        confirmed = 0;
 
-    for (const s of active) {
-      const age = fmtAge(now - s.firedAtMs);
-      const time = s.firedAt.slice(11, 16) + "Z";
-      const current = markPrices.get(s.coin);
+      for (const s of active) {
+        const age = fmtAge(now - s.firedAtMs);
+        const time = s.firedAt.slice(11, 16) + "Z";
+        const current = markPrices.get(s.coin);
 
-      if (!current) {
+        if (!current) {
+          console.log(
+            row(
+              s.coin,
+              time,
+              age,
+              fmtPrice(s.entry),
+              "n/a",
+              "?",
+              "?",
+              s.fundingApr.toFixed(0) + "%",
+              "⏳",
+            ),
+          );
+          continue;
+        }
+
+        confirmed++;
+        const pnl = ((s.entry - current) / s.entry) * 100;
+        const pnl3x = pnl * 3;
+        const icon = pnl > 2 ? "✅" : pnl < -3 ? "❌" : "😐";
+        if (pnl > 0) wins++;
+        totalPnl += pnl;
+
         console.log(
           row(
             s.coin,
             time,
             age,
             fmtPrice(s.entry),
-            "n/a",
-            "?",
-            "?",
+            fmtPrice(current),
+            fmtPct(pnl),
+            fmtPct(pnl3x),
             s.fundingApr.toFixed(0) + "%",
-            "⏳",
+            icon,
           ),
         );
-        continue;
       }
 
-      confirmed++;
-      const pnl = ((s.entry - current) / s.entry) * 100;
-      const pnl3x = pnl * 3;
-      const icon = pnl > 2 ? "✅" : pnl < -3 ? "❌" : "😐";
-      if (pnl > 0) wins++;
-      totalPnl += pnl;
-
-      console.log(
-        row(
-          s.coin,
-          time,
-          age,
-          fmtPrice(s.entry),
-          fmtPrice(current),
-          fmtPct(pnl),
-          fmtPct(pnl3x),
-          s.fundingApr.toFixed(0) + "%",
-          icon,
-        ),
-      );
+      if (confirmed > 0) {
+        console.log(DIVIDER);
+        const avg = totalPnl / confirmed;
+        console.log(
+          `  ${wins}/${confirmed} winning` +
+            `  |  avg: ${fmtPct(avg)}` +
+            `  |  avg at 3x: ${fmtPct(avg * 3)}`,
+        );
+      }
     }
 
-    if (confirmed > 0) {
+    // Expired
+    if (SHOW_ALL && expired.length) {
+      console.log(`\nExpired (>${LOOKAHEAD_H}h) — ${expired.length}`);
+      console.log(HEADER);
       console.log(DIVIDER);
-      const avg = totalPnl / confirmed;
-      console.log(
-        `  ${wins}/${confirmed} winning` +
-          `  |  avg: ${fmtPct(avg)}` +
-          `  |  avg at 3x: ${fmtPct(avg * 3)}`,
-      );
-    }
-  }
 
-  // Expired
-  if (SHOW_ALL && expired.length) {
-    console.log(`\nExpired (>${LOOKAHEAD_H}h) — ${expired.length}`);
-    console.log(HEADER);
-    console.log(DIVIDER);
-
-    let totalPnl = 0,
-      wins = 0,
-      confirmed = 0;
-    for (const s of expired) {
-      const age = fmtAge(now - s.firedAtMs);
-      const time = s.firedAt.slice(11, 16) + "Z";
-      const current = markPrices.get(s.coin);
-      if (!current) {
+      let totalPnl = 0,
+        wins = 0,
+        confirmed = 0;
+      for (const s of expired) {
+        const age = fmtAge(now - s.firedAtMs);
+        const time = s.firedAt.slice(11, 16) + "Z";
+        const current = markPrices.get(s.coin);
+        if (!current) {
+          console.log(
+            row(
+              s.coin,
+              time,
+              age,
+              fmtPrice(s.entry),
+              "n/a",
+              "?",
+              "?",
+              s.fundingApr.toFixed(0) + "%",
+              "—",
+            ),
+          );
+          continue;
+        }
+        confirmed++;
+        const pnl = ((s.entry - current) / s.entry) * 100;
+        const pnl3x = pnl * 3;
+        if (pnl > 0) wins++;
+        totalPnl += pnl;
         console.log(
           row(
             s.coin,
             time,
             age,
             fmtPrice(s.entry),
-            "n/a",
-            "?",
-            "?",
+            fmtPrice(current),
+            fmtPct(pnl),
+            fmtPct(pnl3x),
             s.fundingApr.toFixed(0) + "%",
-            "—",
+            pnl > 0 ? "✅" : "❌",
           ),
         );
-        continue;
       }
-      confirmed++;
-      const pnl = ((s.entry - current) / s.entry) * 100;
-      const pnl3x = pnl * 3;
-      if (pnl > 0) wins++;
-      totalPnl += pnl;
-      console.log(
-        row(
-          s.coin,
-          time,
-          age,
-          fmtPrice(s.entry),
-          fmtPrice(current),
-          fmtPct(pnl),
-          fmtPct(pnl3x),
-          s.fundingApr.toFixed(0) + "%",
-          pnl > 0 ? "✅" : "❌",
-        ),
-      );
+      if (confirmed > 0) {
+        console.log(DIVIDER);
+        const avg = totalPnl / confirmed;
+        console.log(
+          `  ${wins}/${confirmed} winning  |  avg: ${fmtPct(avg)}  |  avg at 3x: ${fmtPct(avg * 3)}`,
+        );
+      }
     }
-    if (confirmed > 0) {
-      console.log(DIVIDER);
-      const avg = totalPnl / confirmed;
-      console.log(
-        `  ${wins}/${confirmed} winning  |  avg: ${fmtPct(avg)}  |  avg at 3x: ${fmtPct(avg * 3)}`,
-      );
-    }
-  }
+  } // end if (toShow.length)
 
   // ── Long bot performance ───────────────────────────────────────────────────
-  const LONG_FILE = "long_positions.json";
+  const LONG_FILE = "bybit_long_positions.json";
   if (existsSync(LONG_FILE)) {
     const ls = JSON.parse(readFileSync(LONG_FILE, "utf8")) as {
       open: Record<
