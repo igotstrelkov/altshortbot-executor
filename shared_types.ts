@@ -11,7 +11,7 @@ export interface Alert {
   oiDropPct?: number; // +ve = OI dropped, -ve = OI rose (squeeze still building)
   recentPumpTop?: boolean; // PUMP_TOP fired within last 12h — squeeze still accelerating
   isRefire?: boolean; // funding became 2× more extreme — more permissive OI gate applies
-  candleHighGapPct?: number;
+  candleHighGapPct?: number; // % between current candle high and close — measures intra-hour latency
 }
 
 export interface QueuedSignal extends Alert {
@@ -32,7 +32,8 @@ export interface PositionRecord {
   stopOid?: number;
   isPaper: boolean;
   highestPriceSeen?: number;
-  trailingStopPx?: number;
+  lowestPriceSeen?: number; // lowest price seen since entry — drives trailing stop
+  trailingStopPx?: number; // current trailing stop level (updated each scan)
 }
 
 export type PositionStore = Record<string, PositionRecord>;

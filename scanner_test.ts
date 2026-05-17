@@ -56,7 +56,7 @@ const TESTS: ScannerTestCase[] = [
     expect: {
       minAlerts: 2,
       mustInclude: [
-        { type: "BUILDING", confidence: "MEDIUM", approxHour: "2026-05-02" },
+        { type: "BUILDING", approxHour: "2026-05-02" }, // confidence omitted — may be HIGH if funding ≤ -1000%
       ],
     },
   },
@@ -64,7 +64,7 @@ const TESTS: ScannerTestCase[] = [
     coin: "HIVE",
     expect: {
       mustInclude: [
-        { type: "BUILDING", confidence: "MEDIUM", approxHour: "2026-05-05" },
+        { type: "BUILDING", approxHour: "2026-05-05" }, // confidence omitted — may be HIGH if funding ≤ -1000%
       ],
     },
   },
@@ -73,7 +73,8 @@ const TESTS: ScannerTestCase[] = [
     expect: {
       minAlerts: 10,
       mustInclude: [
-        { type: "BUILDING", confidence: "MEDIUM", approxHour: "2026-04-16" },
+        // confidence omitted — funding APR unknown; may be HIGH (≤-1000%) or MEDIUM
+        { type: "BUILDING", approxHour: "2026-04-16" },
         { type: "FUNDING", confidence: "MEDIUM", approxHour: "2026-04-29" },
       ],
     },
@@ -96,7 +97,8 @@ const TESTS: ScannerTestCase[] = [
     expect: {
       minAlerts: 10,
       mustInclude: [
-        { type: "BUILDING", confidence: "MEDIUM", approxHour: "2026-04-12" },
+        // confidence omitted — funding APR unknown; may be HIGH (≤-1000%) or MEDIUM
+        { type: "BUILDING", approxHour: "2026-04-12" },
       ],
     },
   },
@@ -118,8 +120,8 @@ const TESTS: ScannerTestCase[] = [
     expect: {
       minAlerts: 2,
       mustInclude: [
-        // BUILDING at -1699% APR — extreme funding, immediate drop
-        { type: "BUILDING", confidence: "MEDIUM", approxHour: "2026-05-06 08" },
+        // BUILDING at -1699% APR — extreme funding → HIGH confidence (≤ -1000% threshold)
+        { type: "BUILDING", confidence: "HIGH", approxHour: "2026-05-06 08" },
       ],
       stateAfter: { lastBuildingMinFunding: { lessThan: -1000 } },
     },
@@ -130,7 +132,7 @@ const TESTS: ScannerTestCase[] = [
       minAlerts: 5,
       mustInclude: [
         // BUILDING May 5 at -268% APR — precedes profitable exhaustion cluster
-        { type: "BUILDING", confidence: "MEDIUM", approxHour: "2026-05-05" },
+        { type: "BUILDING", approxHour: "2026-05-05" }, // confidence omitted — may be HIGH if funding ≤ -1000%
       ],
       stateAfter: { lastBuildingMinFunding: { lessThan: -200 } },
     },

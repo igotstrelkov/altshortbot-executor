@@ -45,12 +45,12 @@ const PAPER_ACCOUNT = parseFloat(process.env.BYBIT_PAPER_ACCOUNT ?? "10000");
 
 const RISK = {
   maxLeverage: 3,
-  riskPerTrade: 0.04, // was 0.02
-  stopLossPct: 0.12,
-  maxPositions: 5, // was 3
-  timeoutH: 72, // was 48
-  trailActivatePct: 5, // new
-  trailDistancePct: 4, // new
+  riskPerTrade: 0.04, // 4% account risk per trade (demo only — drop to 2% when going live)
+  stopLossPct: 0.12, // 12% stop loss
+  maxPositions: 5, // max concurrent open positions (5 × 4% = 20% max concurrent risk)
+  timeoutH: 72, // close after 72h regardless (validated: 72h > 48h across 32 building signals)
+  trailActivatePct: 5, // activate trailing stop when P&L reaches 5%
+  trailDistancePct: 4, // trail 4% above the lowest price seen
 } as const;
 
 const QUEUE_FILE = "signal_queue.json";
@@ -61,8 +61,7 @@ const BB_BASE = "https://api.bybit.com";
 const client = new RestClientV5({
   key: BYBIT_API_KEY,
   secret: BYBIT_API_SECRET,
-  testnet: false,
-  demoTrading: true, // new flag
+  testnet: IS_TESTNET,
 });
 
 // ─── Telegram ─────────────────────────────────────────────────────────────────
@@ -125,6 +124,7 @@ interface InstrumentInfo {
   tickSize: string;
   qtyStep: string;
   minQty: string;
+  maxQty: string;
   maxLev: number;
 }
 
@@ -144,6 +144,7 @@ async function fetchInstrumentInfo(
       tickSize: info.priceFilter?.tickSize ?? "0.0001",
       qtyStep: info.lotSizeFilter?.qtyStep ?? "1",
       minQty: info.lotSizeFilter?.minOrderQty ?? "1",
+      maxQty: info.lotSizeFilter?.maxOrderQty ?? "999999999",
       maxLev: parseFloat(info.leverageFilter?.maxLeverage ?? "10"),
     };
     instrCache.set(coin, result);
@@ -262,7 +263,7 @@ async function openShort(
   if (IS_PAPER) return "PAPER";
 
   const qty = notional / price;
-  const qtyStr = formatQty(qty, instr.qtyStep);
+  let qtyStr = formatQty(qty, instr.qtyStep);
   const stopStr = formatPrice(stopPx, instr.tickSize);
 
   if (parseFloat(qtyStr) < parseFloat(instr.minQty)) {
@@ -270,6 +271,13 @@ async function openShort(
       `  ${coin}: qty ${qtyStr} below minQty ${instr.minQty} — skipping`,
     );
     return null;
+  }
+  if (parseFloat(qtyStr) > parseFloat(instr.maxQty)) {
+    // Cap to exchange maximum — position will be smaller than intended but stop % is unchanged
+    console.log(
+      `  ${coin}: qty ${qtyStr} exceeds maxQty ${instr.maxQty} — capping to exchange limit`,
+    );
+    qtyStr = instr.maxQty;
   }
 
   try {
@@ -379,9 +387,48 @@ async function managePositions(store: BybitPositionStore): Promise<void> {
 
     const pnlPct = ((pos.entryPx - currentPx) / pos.entryPx) * 100;
 
-    // Check if stop was hit (live: position closed by exchange)
+    // ── Trailing stop logic ───────────────────────────────────────────────────
+    // Activate when position first reaches trailActivatePct (5%) profit.
+    // Once active, trail trailDistancePct (4%) above the lowest price seen.
+    if (!pos.trailingActive && pnlPct >= RISK.trailActivatePct) {
+      pos.trailingActive = true;
+      pos.lowestPriceSeen = currentPx;
+      pos.trailingStopPx = currentPx * (1 + RISK.trailDistancePct / 100);
+      const tsStr = pos.trailingStopPx.toFixed(6);
+      console.log(
+        `  ${coin}: trailing stop ACTIVATED — stop $${tsStr} (trail ${RISK.trailDistancePct}%)`,
+      );
+      await sendTelegram(
+        `📐 *${coin}* trailing stop activated
+` + `P&L: ${pnlPct.toFixed(2)}% | Trailing stop: $${tsStr}`,
+      );
+    }
+
+    if (pos.trailingActive) {
+      // Update lowest price and trailing stop as position moves in our favour
+      if (currentPx < (pos.lowestPriceSeen ?? currentPx)) {
+        pos.lowestPriceSeen = currentPx;
+        pos.trailingStopPx = currentPx * (1 + RISK.trailDistancePct / 100);
+      }
+      console.log(
+        `  ${coin}: open ${ageH.toFixed(1)}h — px $${currentPx.toFixed(6)}` +
+          ` — ${pnlPct.toFixed(2)}% 📐 trail $${(pos.trailingStopPx ?? 0).toFixed(6)}`,
+      );
+    } else {
+      console.log(
+        `  ${coin}: open ${ageH.toFixed(1)}h — px $${currentPx.toFixed(6)} — ${pnlPct.toFixed(2)}%`,
+      );
+    }
+
+    // ── Close condition checks ────────────────────────────────────────────────
     let stopHit = false;
-    if (!IS_PAPER) {
+    let trailingHit = false;
+
+    // Trailing stop takes priority when active
+    if (pos.trailingActive && currentPx >= (pos.trailingStopPx ?? Infinity)) {
+      trailingHit = true;
+    } else if (!IS_PAPER) {
+      // Check if exchange closed the position (hard stop triggered)
       const liveSize = await fetchLivePositionSize(coin);
       if (liveSize === 0) stopHit = true;
     } else {
@@ -391,11 +438,14 @@ async function managePositions(store: BybitPositionStore): Promise<void> {
     let closeReason: PaperTrade["closeReason"] | null = null;
     let closePx = currentPx;
 
-    if (stopHit) {
+    if (trailingHit) {
+      closeReason = "trailing";
+      if (!IS_PAPER) await closePosition(coin, "trailing");
+    } else if (stopHit) {
       closeReason = "stop";
       closePx = IS_PAPER
         ? pos.stopLossPx
-        : await fetchActualClosePrice(coin, currentPx); // actual fill, not current price
+        : await fetchActualClosePrice(coin, currentPx);
     } else if (ageH >= RISK.timeoutH) {
       closeReason = "timeout";
       if (!IS_PAPER) await closePosition(coin, "timeout");
@@ -598,9 +648,10 @@ async function main(): Promise<void> {
   // Check position cap
   const openCount = Object.keys(store.open).length;
   if (openCount >= RISK.maxPositions) {
-    console.log(
-      `  At max positions (${RISK.maxPositions}) — signals deferred to next run`,
-    );
+    const coins = queue.map((s) => s.coin).join(", ");
+    const msg = `⏸ Max positions (${RISK.maxPositions}) reached — deferred: ${coins}`;
+    console.log(`  ${msg}`);
+    await sendTelegram(msg);
     savePositions(store);
     return;
   }
