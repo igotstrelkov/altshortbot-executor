@@ -61,7 +61,8 @@ const BB_BASE = "https://api.bybit.com";
 const client = new RestClientV5({
   key: BYBIT_API_KEY,
   secret: BYBIT_API_SECRET,
-  testnet: IS_TESTNET,
+  testnet: false,
+  demoTrading: true, // new flag
 });
 
 // ─── Telegram ─────────────────────────────────────────────────────────────────
