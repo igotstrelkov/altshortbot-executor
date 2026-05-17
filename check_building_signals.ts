@@ -16,8 +16,8 @@ const BB_BASE = "https://api.bybit.com";
 const LOG_FILE = "building_log.jsonl";
 const LOOKAHEAD_H =
   parseInt(
-    process.argv.find((_, i) => process.argv[i - 1] === "--hours") ?? "48",
-  ) || 48;
+    process.argv.find((_, i) => process.argv[i - 1] === "--hours") ?? "72",
+  ) || 72;
 const SHOW_ALL = process.argv.includes("--all");
 const SEED_MODE = process.argv.includes("--seed");
 
