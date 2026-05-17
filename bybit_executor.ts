@@ -51,6 +51,7 @@ const RISK = {
   timeoutH: 72, // close after 72h regardless (validated: 72h > 48h across 32 building signals)
   trailActivatePct: 5, // activate trailing stop when P&L reaches 5%
   trailDistancePct: 4, // trail 4% above the lowest price seen
+  minEntryPrice: 0.0001, // skip coins below this — position sizing breaks on micro-caps
 } as const;
 
 const QUEUE_FILE = "signal_queue.json";
@@ -267,6 +268,15 @@ async function openShort(
   let qtyStr = formatQty(qty, instr.qtyStep);
   const stopStr = formatPrice(stopPx, instr.tickSize);
 
+  if (price < RISK.minEntryPrice) {
+    console.log(
+      `  ${coin}: price $${price} below $${RISK.minEntryPrice} — micro-cap, skipping`,
+    );
+    await sendTelegram(
+      `⚠️ *${coin}* skipped — price $${price} too low for position sizing`,
+    );
+    return null;
+  }
   if (parseFloat(qtyStr) < parseFloat(instr.minQty)) {
     console.log(
       `  ${coin}: qty ${qtyStr} below minQty ${instr.minQty} — skipping`,

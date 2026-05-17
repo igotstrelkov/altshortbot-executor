@@ -41,7 +41,13 @@ import type { Alert, QueuedSignal } from "./shared_types.ts";
 // New listings are picked up automatically; delisted coins drop off cleanly.
 
 // Skip these regardless (index tokens, large caps that almost never fire)
-const EXCLUDE_COINS = new Set(["BTC", "ETH", "BNB", "BTCDOM"]);
+const EXCLUDE_COINS = new Set([
+  "BTC",
+  "ETH",
+  "BNB",
+  "BTCDOM",
+  "BOBBOB", // micro-cap: price too low for position sizing (qty overflow)
+]);
 
 // Sub-penny tokens have squeeze cycles longer than the 10h detection window
 // and produce unreliable exhaustion signals. Filter them out at discovery.
