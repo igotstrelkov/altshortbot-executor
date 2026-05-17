@@ -44,7 +44,9 @@ const SIGNALS: Array<{
     fundingApr: -1446.3,
     oiDropPct: 0.0,
     pumpTopHoursAgo: 2.2,
-    result: "+9.30%",
+    result:
+      "blocked — 2.2h gap < 4h cooldown (missed +9.30% winner — accepted trade-off vs ENJ/FIDA prevention)",
+    expectBlocked: true,
   },
   {
     coin: "1000XEC",
@@ -108,6 +110,17 @@ const SIGNALS: Array<{
     result: "DROPPED -19.23%",
   },
 
+  // FIDA May 17 — pump top at 17:00, building at 20:00 (3h gap) → blocked by 4h cooldown
+  {
+    coin: "FIDA",
+    firedAt: "2026-05-17 20:00",
+    fundingApr: -1177.8,
+    oiDropPct: -144.1,
+    pumpTopHoursAgo: 3.0,
+    result: "blocked — pump top 3h ago → squeezed +8.53% (correct block)",
+    expectBlocked: true,
+  },
+
   // IRYS May 15 — previously blocked by OI gate (OI -280%)
   {
     coin: "IRYS",
@@ -131,12 +144,13 @@ const SIGNALS: Array<{
   // Pump-top cooldown — PUMP_TOP_COOLDOWN_H is currently 0 (disabled),
   // so pump tops never block. Test confirms queued regardless of pump recency.
   {
-    coin: "TEST_PUMP_RECENT",
+    coin: "TEST_PUMP_BLOCK",
     firedAt: "2026-05-01 12:00",
     fundingApr: -500.0,
     oiDropPct: 0.0,
     pumpTopHoursAgo: 1.0,
-    result: "queued — pump-top cooldown is disabled (PUMP_TOP_COOLDOWN_H=0)",
+    result: "blocked — pump top 1h ago < 4h cooldown",
+    expectBlocked: true,
   },
 ];
 

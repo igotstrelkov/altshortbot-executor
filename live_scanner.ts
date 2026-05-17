@@ -102,9 +102,10 @@ const BUILDING_REFIRE_MULTIPLIER = 2.0;
 // When a pump-top fires the squeeze is at peak violence — any BUILDING
 // in the following hours is entering a still-accelerating move.
 // Disabled (set to 0): only one data point (ENJ Apr 8) supported a 12h window,
-// but it also blocked XION (+9.30%) and 1000XEC (+13.79%) which were winners.
-// Re-enable with a calibrated value once more pump-top-then-building cases accumulate.
-const PUMP_TOP_COOLDOWN_H = 0;
+// Evidence now supports re-enabling: ENJ Apr-8 (2h gap → stop-out), FIDA May-17 (3h gap → squeezed).
+// XION (2.2h gap) is a missed winner at 4h but ENJ+FIDA prevention outweighs it.
+// 1000XEC at 5.2h still gets through.
+const PUMP_TOP_COOLDOWN_H = 4;
 // Block BUILDING queue entry if OI increased >50% in squeeze window.
 // Negative oiDropPct means OI rose — squeeze still actively building.
 // Evidence: SOLV May-12 oiDropPct=-182.9% → SQUEEZED; flat OI (0%) → profitable.
