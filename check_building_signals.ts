@@ -11,6 +11,7 @@
  */
 
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "fs";
+import type { PaperTrade } from "./shared_types.ts";
 
 const BB_BASE = "https://api.bybit.com";
 const LOG_FILE = "building_log.jsonl";
@@ -328,6 +329,126 @@ async function main() {
         `  ${wins}/${confirmed} winning  |  avg: ${fmtPct(avg)}  |  avg at 3x: ${fmtPct(avg * 3)}`,
       );
     }
+  }
+
+  // ── Long bot performance ───────────────────────────────────────────────────
+  const LONG_FILE = "long_positions.json";
+  if (existsSync(LONG_FILE)) {
+    const ls = JSON.parse(readFileSync(LONG_FILE, "utf8")) as {
+      open: Record<
+        string,
+        {
+          coin: string;
+          entryPx: number;
+          openedAt: number;
+          stopLossPx: number;
+          fundingApr?: number;
+          highestPriceSeen?: number;
+          trailingStopPx?: number;
+          trailingActive?: boolean;
+        }
+      >;
+      closed: PaperTrade[];
+      paperEquityUsdt: number;
+    };
+    const lOpen = Object.entries(ls.open);
+    const lClosed = ls.closed;
+    const lCoins = [...lOpen.map(([c]) => c), ...lClosed.map((t) => t.coin)];
+    const lPrices = lCoins.length
+      ? await fetchMarkPrices([...new Set(lCoins)])
+      : new Map<string, number>();
+
+    console.log(`
+Long Bot — Paper Trading`);
+    console.log(
+      `Paper equity: $${ls.paperEquityUsdt.toFixed(2)}  (start: $10,000.00  ${ls.paperEquityUsdt - 10000 >= 0 ? "+" : ""}$${(ls.paperEquityUsdt - 10000).toFixed(2)})`,
+    );
+
+    if (lOpen.length) {
+      console.log(`
+Open Longs (${lOpen.length})`);
+      console.log(HEADER);
+      console.log(DIVIDER);
+      for (const [coin, pos] of lOpen) {
+        const price = lPrices.get(coin);
+        const age = fmtAge(now - pos.openedAt);
+        const time = new Date(pos.openedAt).toISOString().slice(11, 16) + "Z";
+        if (!price) {
+          console.log(
+            row(
+              coin,
+              time,
+              age,
+              fmtPrice(pos.entryPx),
+              "n/a",
+              "?",
+              "?",
+              (pos.fundingApr?.toFixed(0) ?? "?") + "%",
+              "⏳",
+            ),
+          );
+          continue;
+        }
+        const pnl = ((price - pos.entryPx) / pos.entryPx) * 100; // long: up = profit
+        const icon = pnl > 2 ? "✅" : pnl < -3 ? "❌" : "😐";
+        const trailStr =
+          pos.trailingActive && pos.trailingStopPx
+            ? ` 📐 trail $${pos.trailingStopPx.toFixed(6)}`
+            : "";
+        console.log(
+          row(
+            coin,
+            time,
+            age,
+            fmtPrice(pos.entryPx),
+            fmtPrice(price),
+            fmtPct(pnl),
+            fmtPct(pnl * 3),
+            (pos.fundingApr?.toFixed(0) ?? "?") + "%",
+            icon,
+          ) + trailStr,
+        );
+      }
+    }
+
+    if (lClosed.length) {
+      console.log(`
+Closed Longs (${lClosed.length})`);
+      console.log(HEADER);
+      console.log(DIVIDER);
+      let totalPnl = 0,
+        wins = 0;
+      for (const t of [...lClosed].reverse()) {
+        const price = lPrices.get(t.coin);
+        const age = fmtAge(now - t.openedAt);
+        const time = new Date(t.openedAt).toISOString().slice(11, 16) + "Z";
+        const icon = t.pnlPct > 0 ? "✅" : "❌";
+        if (t.pnlPct > 0) wins++;
+        totalPnl += t.pnlPct;
+        const curStr = price ? fmtPrice(price) : "n/a";
+        console.log(
+          row(
+            t.coin,
+            time,
+            age,
+            fmtPrice(t.entryPx),
+            fmtPrice(t.exitPx),
+            fmtPct(t.pnlPct),
+            fmtPct(t.pnlPct * 3),
+            "closed",
+            icon,
+          ),
+        );
+      }
+      console.log(DIVIDER);
+      const avg = totalPnl / lClosed.length;
+      console.log(
+        `  ${wins}/${lClosed.length} winning  |  avg: ${fmtPct(avg)}  |  avg at 3x: ${fmtPct(avg * 3)}`,
+      );
+    }
+
+    if (!lOpen.length && !lClosed.length)
+      console.log("  No long positions yet.");
   }
 
   console.log();
