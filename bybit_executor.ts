@@ -293,6 +293,35 @@ async function openShort(
       tpslMode: "Full",
       positionIdx: 0, // one-way mode
     });
+    if (res.retCode === 10001 && res.retMsg?.includes("max_qty")) {
+      // Bybit rejected qty as too large — parse actual max from error and retry once
+      const match = res.retMsg.match(/max_qty:(\d+)/);
+      if (match) {
+        qtyStr = match[1];
+        console.log(
+          `  ${coin}: qty capped to error-derived max ${qtyStr} — retrying`,
+        );
+        const res2 = await client.submitOrder({
+          category: "linear",
+          symbol: `${coin}USDT`,
+          side: "Sell",
+          orderType: "Market",
+          qty: qtyStr,
+          stopLoss: stopStr,
+          slTriggerBy: "MarkPrice",
+          tpslMode: "Full",
+          positionIdx: 0,
+        });
+        if (res2.retCode !== 0) {
+          await alertError(
+            `openShort(${coin})`,
+            `retCode ${res2.retCode}: ${res2.retMsg}`,
+          );
+          return null;
+        }
+        return res2.result?.orderId ?? null;
+      }
+    }
     if (res.retCode !== 0) {
       await alertError(
         `openShort(${coin})`,
