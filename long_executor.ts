@@ -41,7 +41,7 @@ const RISK = {
   stopLossPct: 0.12, // 12% stop loss below entry (standard)
   stopLossPctWide: 0.2, // 20% stop loss for high-conviction signals (funding > wideStopThreshold)
   wideStopThreshold: 400, // APR above which to use wider stop (LAB-class volatility)
-  maxPositions: 5,
+  maxPositions: 7, // long bot clusters in bull markets — more slots needed
   timeoutH: 72, // validated: same as short bot
   trailActivatePct: 5, // activate trailing when P&L >= 5%
   trailDistancePct: 4, // trail 4% below the highest price seen

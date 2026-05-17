@@ -45,13 +45,14 @@ const PAPER_ACCOUNT = parseFloat(process.env.BYBIT_PAPER_ACCOUNT ?? "10000");
 
 const RISK = {
   maxLeverage: 3,
-  riskPerTrade: 0.04, // 4% account risk per trade (demo only — drop to 2% when going live)
+  riskPerTrade: 0.08, // 8% per trade — 5 × 8% = 40% max concurrent drawdown on $10k account
   stopLossPct: 0.12, // 12% stop loss
   maxPositions: 5, // max concurrent open positions (5 × 4% = 20% max concurrent risk)
   timeoutH: 72, // close after 72h regardless (validated: 72h > 48h across 32 building signals)
   trailActivatePct: 5, // activate trailing stop when P&L reaches 5%
   trailDistancePct: 4, // trail 4% above the lowest price seen
-  minEntryPrice: 0.0001, // skip coins below this — position sizing breaks on micro-caps
+  minEntryPrice: 0.0001, // skip coins priced below this
+  minViableNotional: 500, // skip if capped notional < $500   // skip if notional at maxMktOrderQty < $500 (position too tiny)
 } as const;
 
 const QUEUE_FILE = "signal_queue.json";
@@ -146,7 +147,11 @@ async function fetchInstrumentInfo(
       tickSize: info.priceFilter?.tickSize ?? "0.0001",
       qtyStep: info.lotSizeFilter?.qtyStep ?? "1",
       minQty: info.lotSizeFilter?.minOrderQty ?? "1",
-      maxQty: info.lotSizeFilter?.maxOrderQty ?? "999999999",
+      // maxMktOrderQty is the correct limit for market orders (stricter than maxOrderQty)
+      maxQty:
+        info.lotSizeFilter?.maxMktOrderQty ??
+        info.lotSizeFilter?.maxOrderQty ??
+        "999999999",
       maxLev: parseFloat(info.leverageFilter?.maxLeverage ?? "10"),
     };
     instrCache.set(coin, result);
@@ -213,6 +218,13 @@ async function fetchAccountEquity(): Promise<number | null> {
       accountType: "UNIFIED",
       coin: "USDT",
     });
+    if (res.retCode !== 0) {
+      await alertError(
+        "fetchAccountEquity",
+        `retCode ${res.retCode}: ${res.retMsg}`,
+      );
+      return null;
+    }
     const coin = res.result?.list?.[0]?.coin?.find(
       (c: any) => c.coin === "USDT",
     );
@@ -268,14 +280,24 @@ async function openShort(
   let qtyStr = formatQty(qty, instr.qtyStep);
   const stopStr = formatPrice(stopPx, instr.tickSize);
 
-  if (price < RISK.minEntryPrice) {
+  if (parseFloat(qtyStr) > parseFloat(instr.maxQty)) {
+    const maxQtyNum = parseFloat(instr.maxQty);
+    const maxNotional = maxQtyNum * price;
+    if (maxNotional < RISK.minViableNotional) {
+      // Even at exchange max qty the position is too tiny — coin price is near zero
+      console.log(
+        `  ${coin}: maxNotional $${maxNotional.toFixed(2)} < $${RISK.minViableNotional} — too cheap, skipping`,
+      );
+      await sendTelegram(
+        `⚠️ *${coin}* skipped — max position only $${maxNotional.toFixed(0)} (price near zero)`,
+      );
+      return null;
+    }
+    // Cap to maxMktOrderQty — position smaller than intended but still viable
     console.log(
-      `  ${coin}: price $${price} below $${RISK.minEntryPrice} — micro-cap, skipping`,
+      `  ${coin}: qty capped to maxMktOrderQty ${instr.maxQty} (~$${maxNotional.toFixed(0)} notional)`,
     );
-    await sendTelegram(
-      `⚠️ *${coin}* skipped — price $${price} too low for position sizing`,
-    );
-    return null;
+    qtyStr = instr.maxQty;
   }
   if (parseFloat(qtyStr) < parseFloat(instr.minQty)) {
     console.log(
@@ -283,14 +305,6 @@ async function openShort(
     );
     return null;
   }
-  if (parseFloat(qtyStr) > parseFloat(instr.maxQty)) {
-    // Cap to exchange maximum — position will be smaller than intended but stop % is unchanged
-    console.log(
-      `  ${coin}: qty ${qtyStr} exceeds maxQty ${instr.maxQty} — capping to exchange limit`,
-    );
-    qtyStr = instr.maxQty;
-  }
-
   try {
     const res = await client.submitOrder({
       category: "linear",
