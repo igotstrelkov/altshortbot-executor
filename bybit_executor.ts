@@ -48,7 +48,7 @@ const RISK = {
   riskPerTrade: 0.04, // was 0.02
   stopLossPct: 0.12,
   maxPositions: 5, // was 3
-  timeoutH: 72, // was 48
+  timeoutH: 48, // was 48
   trailActivatePct: 5, // new
   trailDistancePct: 4, // new
 } as const;

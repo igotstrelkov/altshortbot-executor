@@ -31,6 +31,7 @@ export interface PositionRecord {
   signalConfidence: "HIGH" | "MEDIUM";
   stopOid?: number;
   isPaper: boolean;
+  trailingStopPx?: number;
 }
 
 export type PositionStore = Record<string, PositionRecord>;
