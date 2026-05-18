@@ -27,13 +27,14 @@ export interface PositionRecord {
   stopLossPx: number;
   targetPx: number;
   trailingActive: boolean;
+  lowestPriceSeen?: number; // short bot: lowest price seen since entry
+  highestPriceSeen?: number; // long bot: highest price seen since entry
+  trailingStopPx?: number; // current trailing stop level (updated each scan)
+  fundingApr?: number; // funding APR at signal time (used for tiered trail)
   signalType: "EXHAUSTION" | "TREND_BREAK" | "BUILDING";
   signalConfidence: "HIGH" | "MEDIUM";
   stopOid?: number;
   isPaper: boolean;
-  highestPriceSeen?: number;
-  lowestPriceSeen?: number; // lowest price seen since entry — drives trailing stop
-  trailingStopPx?: number; // current trailing stop level (updated each scan)
 }
 
 export type PositionStore = Record<string, PositionRecord>;

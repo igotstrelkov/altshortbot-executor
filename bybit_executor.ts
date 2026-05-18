@@ -55,6 +55,15 @@ const RISK = {
   minViableNotional: 500, // skip if capped notional < $500   // skip if notional at maxMktOrderQty < $500 (position too tiny)
 } as const;
 
+// Tiered trail distance based on funding intensity at signal time.
+// Higher funding = more violent squeeze = needs wider trail to avoid premature exit.
+// Data: BOBBOB -14981% APR closed at +1.11% then continued to +6.64% (4% trail too tight)
+function getTrailDistance(fundingApr: number): number {
+  if (fundingApr <= -5000) return 8; // ultra-high: BOBBOB-level squeezes
+  if (fundingApr <= -1000) return 6; // high: IRYS, STORJ, SOLV level
+  return RISK.trailDistancePct; // normal: 4%
+}
+
 const QUEUE_FILE = "signal_queue.json";
 const POSITIONS_FILE = "bybit_positions.json";
 const BB_BASE = "https://api.bybit.com";
@@ -445,12 +454,15 @@ async function managePositions(store: BybitPositionStore): Promise<void> {
     // Activate when position first reaches trailActivatePct (5%) profit.
     // Once active, trail trailDistancePct (4%) above the lowest price seen.
     if (!pos.trailingActive && pnlPct >= RISK.trailActivatePct) {
+      const trailDist = getTrailDistance(
+        pos.fundingApr ?? RISK.trailDistancePct,
+      );
       pos.trailingActive = true;
       pos.lowestPriceSeen = currentPx;
-      pos.trailingStopPx = currentPx * (1 + RISK.trailDistancePct / 100);
+      pos.trailingStopPx = currentPx * (1 + trailDist / 100);
       const tsStr = pos.trailingStopPx.toFixed(6);
       console.log(
-        `  ${coin}: trailing stop ACTIVATED — stop $${tsStr} (trail ${RISK.trailDistancePct}%)`,
+        `  ${coin}: trailing stop ACTIVATED — stop $${tsStr} (trail ${trailDist}%)`,
       );
       await sendTelegram(
         `📐 *${coin}* trailing stop activated
@@ -462,7 +474,9 @@ async function managePositions(store: BybitPositionStore): Promise<void> {
       // Update lowest price and trailing stop as position moves in our favour
       if (currentPx < (pos.lowestPriceSeen ?? currentPx)) {
         pos.lowestPriceSeen = currentPx;
-        pos.trailingStopPx = currentPx * (1 + RISK.trailDistancePct / 100);
+        pos.trailingStopPx =
+          currentPx *
+          (1 + getTrailDistance(pos.fundingApr ?? RISK.trailDistancePct) / 100);
       }
       console.log(
         `  ${coin}: open ${ageH.toFixed(1)}h — px $${currentPx.toFixed(6)}` +
@@ -601,6 +615,7 @@ async function executeSignal(
     stopLossPx: stopPx,
     targetPx: entry * 0.75, // 25% target (informational)
     trailingActive: false,
+    fundingApr, // from destructured signal — used for tiered trail distance
     signalType: signalType as PositionRecord["signalType"],
     signalConfidence: confidence as PositionRecord["signalConfidence"],
     isPaper: IS_PAPER,
