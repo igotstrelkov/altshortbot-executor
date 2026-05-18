@@ -27,12 +27,14 @@ const COMPETITOR_TRADES: CompetitorTrade[] = [
   { coin: "BSB", leverage: 1, roi: 25.55, entry: 1.1394, exit: 0.8482 },
   { coin: "KNC", leverage: 1, roi: 12.26, entry: 0.16874, exit: 0.14805 },
   { coin: "HIVE", leverage: 1, roi: 16.06, entry: 0.08004, exit: 0.06718 },
+  { coin: "MBOX", leverage: 1, roi: 21.0, entry: 0.0156, exit: 0.0123 },
+  { coin: "MLN", leverage: 1, roi: 9.91, entry: 3.654, exit: 3.292 },
 ];
 
 // ── Parameters (validated set) ────────────────────────────────────────────────
 const BACKTEST_ARGS = [
   "--days",
-  "60",
+  "90", // ← increase to cover older trades
   "--threshold",
   "10",
   "--min-positive",
@@ -42,7 +44,7 @@ const BACKTEST_ARGS = [
   "--max-price",
   "2",
   "--pump-pct",
-  "25",
+  "19", // ← fix from 25
   "--pump-vol",
   "5",
   "--pump-rsi",
@@ -59,12 +61,10 @@ const BACKTEST_ARGS = [
   "0",
   "--exhaust-funding",
   "-20",
-  // NOTE: --exhaust-oi-drop intentionally omitted here.
-  // Bybit OI covers only ~8 days; signals older than that would be blocked,
-  // making this a test of OI data coverage rather than signal detection.
-  // The live scanner always has fresh OI so the filter works correctly in production.
+  "--exhaust-oi-drop",
+  "0", // ← add explicitly (OI data limited for 90d)
   "--source",
-  "bybit", // matches live scanner data source
+  "bybit",
   "--lookahead",
   "48",
 ];

@@ -121,6 +121,47 @@ const SIGNALS: Array<{
     isRefire: false,
     result: "+30%",
   },
+  // ── May 14-15 live signals — all queued and profitable ────────────────────
+  {
+    coin: "MLN",
+    firedAt: "2026-05-14 12:12",
+    fundingApr: -764.0,
+    oiDropPct: -34.4,
+    pumpTopHoursAgo: null,
+    result: "+26.04% (101h)",
+  },
+  {
+    coin: "TAC",
+    firedAt: "2026-05-14 20:12",
+    fundingApr: -699.0,
+    oiDropPct: -29.5,
+    pumpTopHoursAgo: null,
+    result: "+12.31% (93h)",
+  },
+  {
+    coin: "AIGENSYN",
+    firedAt: "2026-05-14 13:17",
+    fundingApr: -465.0,
+    oiDropPct: -138.0,
+    pumpTopHoursAgo: null,
+    result: "+14.38% (100h)",
+  },
+  {
+    coin: "MLN",
+    firedAt: "2026-05-15 04:12",
+    fundingApr: -1209.0,
+    oiDropPct: -34.4,
+    pumpTopHoursAgo: null,
+    result: "+26.04% (85h)",
+  },
+  {
+    coin: "AIGENSYN",
+    firedAt: "2026-05-15 08:07",
+    fundingApr: -406.0,
+    oiDropPct: -34.5,
+    pumpTopHoursAgo: null,
+    result: "+19.27% (81h)",
+  },
 ];
 
 // ── Gate logic ────────────────────────────────────────────────────────────────
