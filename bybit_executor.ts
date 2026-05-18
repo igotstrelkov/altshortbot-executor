@@ -125,6 +125,7 @@ interface InstrumentInfo {
   tickSize: string;
   qtyStep: string;
   minQty: string;
+  maxQty: string;
   maxLev: number;
 }
 
@@ -144,6 +145,8 @@ async function fetchInstrumentInfo(
       tickSize: info.priceFilter?.tickSize ?? "0.0001",
       qtyStep: info.lotSizeFilter?.qtyStep ?? "1",
       minQty: info.lotSizeFilter?.minOrderQty ?? "1",
+      // maxMktOrderQty is the correct limit for market orders (stricter than maxOrderQty)
+      maxQty: info.lotSizeFilter?.maxMktOrderQty ?? "999999999",
       maxLev: parseFloat(info.leverageFilter?.maxLeverage ?? "10"),
     };
     instrCache.set(coin, result);
@@ -210,6 +213,13 @@ async function fetchAccountEquity(): Promise<number | null> {
       accountType: "UNIFIED",
       coin: "USDT",
     });
+    if (res.retCode !== 0) {
+      await alertError(
+        "fetchAccountEquity",
+        `retCode ${res.retCode}: ${res.retMsg}`,
+      );
+      return null;
+    }
     const coin = res.result?.list?.[0]?.coin?.find(
       (c: any) => c.coin === "USDT",
     );
@@ -378,10 +388,15 @@ async function managePositions(store: BybitPositionStore): Promise<void> {
     }
 
     const pnlPct = ((pos.entryPx - currentPx) / pos.entryPx) * 100;
+    console.log(
+      `  ${coin}: open ${ageH.toFixed(1)}h — px $${currentPx.toFixed(6)} — ${pnlPct.toFixed(2)}%`,
+    );
 
-    // Check if stop was hit (live: position closed by exchange)
+    // ── Close condition checks ────────────────────────────────────────────────
     let stopHit = false;
+
     if (!IS_PAPER) {
+      // Check if exchange closed the position (hard stop triggered)
       const liveSize = await fetchLivePositionSize(coin);
       if (liveSize === 0) stopHit = true;
     } else {
@@ -395,7 +410,7 @@ async function managePositions(store: BybitPositionStore): Promise<void> {
       closeReason = "stop";
       closePx = IS_PAPER
         ? pos.stopLossPx
-        : await fetchActualClosePrice(coin, currentPx); // actual fill, not current price
+        : await fetchActualClosePrice(coin, currentPx);
     } else if (ageH >= RISK.timeoutH) {
       closeReason = "timeout";
       if (!IS_PAPER) await closePosition(coin, "timeout");
@@ -598,9 +613,10 @@ async function main(): Promise<void> {
   // Check position cap
   const openCount = Object.keys(store.open).length;
   if (openCount >= RISK.maxPositions) {
-    console.log(
-      `  At max positions (${RISK.maxPositions}) — signals deferred to next run`,
-    );
+    const coins = queue.map((s) => s.coin).join(", ");
+    const msg = `⏸ Max positions (${RISK.maxPositions}) reached — deferred: ${coins}`;
+    console.log(`  ${msg}`);
+    await sendTelegram(msg);
     savePositions(store);
     return;
   }
