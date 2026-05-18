@@ -366,60 +366,24 @@ async function managePositions(store: LongPositionStore): Promise<void> {
     // P&L for long: positive when price rises above entry
     const pnlPct = ((currentPx - pos.entryPx) / pos.entryPx) * 100;
 
-    // ── Trailing stop (LONG version — tracks HIGHEST price seen) ─────────────
-    // Activates when profit reaches trailActivatePct.
-    // Trails trailDistancePct BELOW the highest price seen.
-    const highest = (pos as any).highestPriceSeen as number | undefined;
-
-    if (!pos.trailingActive && pnlPct >= RISK.trailActivatePct) {
-      pos.trailingActive = true;
-      (pos as any).highestPriceSeen = currentPx;
-      pos.trailingStopPx = currentPx * (1 - RISK.trailDistancePct / 100);
-      const tsStr = pos.trailingStopPx!.toFixed(6);
-      console.log(`  ${coin}: trailing stop ACTIVATED — stop $${tsStr}`);
-      await sendTelegram(
-        `📐 *${coin}* long trailing stop activated\n` +
-          `P&L: +${pnlPct.toFixed(2)}% | Trail stop: $${tsStr}`,
-      );
-    }
-
-    if (pos.trailingActive) {
-      // Update highest price and trailing stop as position moves in our favour (UP)
-      if (currentPx > ((pos as any).highestPriceSeen ?? 0)) {
-        (pos as any).highestPriceSeen = currentPx;
-        pos.trailingStopPx = currentPx * (1 - RISK.trailDistancePct / 100);
-      }
-      console.log(
-        `  ${coin}: open ${ageH.toFixed(1)}h — px $${currentPx.toFixed(6)}` +
-          ` — ${pnlPct.toFixed(2)}% 📐 trail $${(pos.trailingStopPx ?? 0).toFixed(6)}`,
-      );
-    } else {
-      console.log(
-        `  ${coin}: open ${ageH.toFixed(1)}h — px $${currentPx.toFixed(6)} — ${pnlPct.toFixed(2)}%`,
-      );
-    }
+    console.log(
+      `  ${coin}: open ${ageH.toFixed(1)}h — px $${currentPx.toFixed(6)} — ${pnlPct.toFixed(2)}%`,
+    );
 
     // ── Close condition checks ────────────────────────────────────────────────
-    let trailingHit = false;
     let stopHit = false;
 
-    // Trailing stop: price dropped below trail (for longs, trail is BELOW current)
-    if (pos.trailingActive && currentPx <= (pos.trailingStopPx ?? 0)) {
-      trailingHit = true;
-    } else if (!IS_PAPER) {
+    if (!IS_PAPER) {
       const liveSize = await fetchLivePositionSize(coin);
       if (liveSize === 0) stopHit = true;
     } else {
-      stopHit = currentPx <= pos.stopLossPx; // ← LONGS: stop triggers when price falls to stopPx
+      stopHit = currentPx <= pos.stopLossPx;
     }
 
     let closeReason: PaperTrade["closeReason"] | null = null;
     let closePx = currentPx;
 
-    if (trailingHit) {
-      closeReason = "trailing";
-      if (!IS_PAPER) await closePosition(coin, "trailing");
-    } else if (stopHit) {
+    if (stopHit) {
       closeReason = "stop";
       closePx = IS_PAPER
         ? pos.stopLossPx
