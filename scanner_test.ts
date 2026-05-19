@@ -85,19 +85,18 @@ const TESTS: ScannerTestCase[] = [
       mustInclude: [
         { type: "BUILDING", confidence: "MEDIUM", approxHour: "2026-04-20" },
       ],
+      // lastBuildingMinFunding < -500 is the TREND_BREAK precondition — even
+      // though TREND_BREAK doesn't fire on this fixture (no EXHAUSTION upstream),
+      // assert the state machine correctly recorded the deeply negative funding.
       stateAfter: { lastBuildingMinFunding: { lessThan: -500 } },
     },
   },
   {
     coin: "ENJ",
     expect: {
-      // Scanner re-fire logic (funding must be 2× more extreme) produces fewer
-      // signals than the backtest (which deduplicates by 4h time bucket).
-      // With Mar 10 - May 19 fixture: March wave sets state, limiting April re-fires.
-      // Calibrated to actual scanner output — catches any regression below 7.
-      minAlerts: 7,
+      minAlerts: 10,
       mustInclude: [
-        { type: "BUILDING", confidence: "MEDIUM", approxHour: "2026-04-08" },
+        { type: "BUILDING", confidence: "MEDIUM", approxHour: "2026-04-12" },
       ],
     },
   },
@@ -108,6 +107,9 @@ const TESTS: ScannerTestCase[] = [
       mustInclude: [
         { type: "FUNDING", confidence: "MEDIUM", approxHour: "2026-04-30" },
       ],
+      // HYPER is in a parabolic uptrend during the fixture window — BUILDING
+      // alerts are suppressed by the trend filter, but the underlying
+      // lastBuildingMinFunding is still recorded internally.
       stateAfter: { lastBuildingMinFunding: { lessThan: -500 } },
     },
   },
@@ -116,6 +118,7 @@ const TESTS: ScannerTestCase[] = [
     expect: {
       minAlerts: 2,
       mustInclude: [
+        // BUILDING at -1699% APR — extreme funding, immediate drop
         { type: "BUILDING", confidence: "MEDIUM", approxHour: "2026-05-06 08" },
       ],
       stateAfter: { lastBuildingMinFunding: { lessThan: -1000 } },
@@ -126,6 +129,7 @@ const TESTS: ScannerTestCase[] = [
     expect: {
       minAlerts: 5,
       mustInclude: [
+        // BUILDING May 5 at -268% APR — precedes profitable exhaustion cluster
         { type: "BUILDING", confidence: "MEDIUM", approxHour: "2026-05-05" },
       ],
       stateAfter: { lastBuildingMinFunding: { lessThan: -200 } },
