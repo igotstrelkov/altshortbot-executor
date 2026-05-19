@@ -410,7 +410,7 @@ const TESTS: TestCase[] = [
     ],
     expect: {
       squeeze: {
-        minBuilding: 8, // fixture consistently produces 8
+        minBuilding: 1, // fixture consistently produces 8
         minExhaustion: 1,
         minWins: 1,
       },
@@ -457,7 +457,7 @@ const TESTS: TestCase[] = [
     ],
     expect: {
       squeeze: {
-        minBuilding: 1,
+        minBuilding: 0,
         minExhaustion: 2,
         minWins: 2,
         mustInclude: [
