@@ -1,6 +1,12 @@
 export interface Alert {
   coin: string;
-  type: "FUNDING" | "PUMP_TOP" | "BUILDING" | "EXHAUSTION" | "TREND_BREAK";
+  type:
+    | "FUNDING"
+    | "PUMP_TOP"
+    | "BUILDING"
+    | "EXHAUSTION"
+    | "TREND_BREAK"
+    | "POST_PUMP_REVERSAL";
   firedAt: number;
   firedAtStr: string;
   entry: number;
@@ -27,7 +33,7 @@ export interface PositionRecord {
   stopLossPx: number;
   targetPx: number;
   trailingActive: boolean;
-  signalType: "EXHAUSTION" | "TREND_BREAK" | "BUILDING";
+  signalType: "EXHAUSTION" | "TREND_BREAK" | "BUILDING" | "POST_PUMP_REVERSAL";
   signalConfidence: "HIGH" | "MEDIUM";
   stopOid?: number;
   isPaper: boolean;

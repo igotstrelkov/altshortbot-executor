@@ -174,9 +174,20 @@ interface PumpSignal {
   fundingApr: number;
 }
 
+interface PostPumpSignal {
+  coin: string;
+  firedAtMs: number;
+  firedAtStr: string;
+  entryPrice: number;
+  fundingApr: number;
+  oiDropPct: number;
+  hoursSincePump: number;
+  pumpFiredAtStr: string;
+}
+
 interface Outcome {
-  signal: Signal | PumpSignal;
-  signalType: "FUNDING" | "PUMP_TOP" | "SQUEEZE";
+  signal: Signal | PumpSignal | PostPumpSignal;
+  signalType: "FUNDING" | "PUMP_TOP" | "SQUEEZE" | "POST_PUMP_REVERSAL";
   maxPricePct: number;
   minPricePct: number;
   finalPricePct: number;
@@ -188,6 +199,7 @@ interface CoinResult {
   outcomes: Outcome[]; // funding strategy signals
   pumpOutcomes: Outcome[]; // pump-top strategy signals
   squeezeOutcomes: Outcome[]; // short squeeze signals
+  postPumpOutcomes: Outcome[]; // post-pump OI collapse signals
   allHours: number[];
   priceByHour: Record<number, number>;
   fundingAprByHour: Record<number, number>;
@@ -1173,8 +1185,10 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
     pSeries: number[] = [];
   const signals: Signal[] = [];
   const pumpSignals: PumpSignal[] = [];
+  const postPumpSignals: PostPumpSignal[] = [];
   const sigSet = new Set<string>();
   const pumpSigSet = new Set<string>();
+  const postPumpSigSet = new Set<string>();
   const COOL = 4 * 3600_000;
   const allHours = Object.keys(priceByHour)
     .map(Number)
@@ -1185,6 +1199,11 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
     maxPumpVolMult = 0,
     maxPumpRsi = 0,
     maxPumpFunding = 0;
+  let lastPumpTopMs: number | null = null;
+  let postPumpOiPeak = 0;
+  let postPumpAlerted = false;
+  const POST_PUMP_LOOKBACK_H = 12;
+  const POST_PUMP_OI_DROP_PCT = 15;
   const squeezeSignals: SqueezeSignal[] = [];
   const squeezeSigSet = new Set<string>();
   let lastSqueezePhase: "BUILDING" | "EXHAUSTION" | "TREND_BREAK" | null = null;
@@ -1256,6 +1275,46 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
             rsi: Math.round(pump.rsi),
             fundingApr: Math.round(pump.fundingApr * 10) / 10,
           });
+        }
+        // Reset post-pump tracking for new pump wave
+        lastPumpTopMs = ts;
+        postPumpOiPeak =
+          oiSeries.length > 0 ? oiSeries[oiSeries.length - 1] : 0;
+        postPumpAlerted = false;
+      }
+
+      // ── Post-pump OI collapse (POST_PUMP_REVERSAL) ────────────────────────
+      if (lastPumpTopMs !== null && !postPumpAlerted) {
+        const hoursSincePump = (ts - lastPumpTopMs) / 3_600_000;
+        if (hoursSincePump > 0 && hoursSincePump <= POST_PUMP_LOOKBACK_H) {
+          const currentOI =
+            oiSeries.length > 0 ? oiSeries[oiSeries.length - 1] : 0;
+          if (currentOI > postPumpOiPeak) postPumpOiPeak = currentOI;
+          const oiDropPct =
+            postPumpOiPeak > 0
+              ? ((currentOI - postPumpOiPeak) / postPumpOiPeak) * 100
+              : 0;
+          if (oiDropPct <= -POST_PUMP_OI_DROP_PCT) {
+            const ppKey = `ppr:${coin}:${Math.floor(ts / COOL)}`;
+            if (!postPumpSigSet.has(ppKey)) {
+              postPumpSigSet.add(ppKey);
+              postPumpSignals.push({
+                coin,
+                firedAtMs: ts,
+                firedAtStr: fmtDate(ts),
+                entryPrice: price,
+                fundingApr: Math.round(fRate * 8760 * 100 * 10) / 10,
+                oiDropPct: Math.round(oiDropPct * 10) / 10,
+                hoursSincePump: Math.round(hoursSincePump * 10) / 10,
+                pumpFiredAtStr: fmtDate(lastPumpTopMs),
+              });
+            }
+            postPumpAlerted = true;
+          }
+        } else if (hoursSincePump > POST_PUMP_LOOKBACK_H) {
+          lastPumpTopMs = null;
+          postPumpOiPeak = 0;
+          postPumpAlerted = false;
         }
       }
     }
@@ -1593,6 +1652,41 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
     });
   }
 
+  // Post-pump reversal outcomes
+  const postPumpOutcomes: Outcome[] = [];
+  for (const sig of postPumpSignals) {
+    const fwdEnd = sig.firedAtMs + config.lookaheadHours * 3600_000;
+    let maxP = sig.entryPrice,
+      minP = sig.entryPrice,
+      finalP = sig.entryPrice;
+    for (const ts of allHours.filter((t) => t > sig.firedAtMs && t <= fwdEnd)) {
+      const p = priceByHour[ts];
+      if (!p) continue;
+      if (p > maxP) maxP = p;
+      if (p < minP) minP = p;
+      finalP = p;
+    }
+    const maxPct = ((maxP - sig.entryPrice) / sig.entryPrice) * 100;
+    const minPct = ((minP - sig.entryPrice) / sig.entryPrice) * 100;
+    const finalPct = ((finalP - sig.entryPrice) / sig.entryPrice) * 100;
+    const verdict =
+      maxPct > 2 && finalPct < -3
+        ? "PUMP+DUMP"
+        : finalPct < -3
+          ? "DROPPED"
+          : finalPct > 3
+            ? "SQUEEZED"
+            : "NEUTRAL";
+    postPumpOutcomes.push({
+      signal: sig,
+      signalType: "POST_PUMP_REVERSAL",
+      maxPricePct: maxPct,
+      minPricePct: minPct,
+      finalPricePct: finalPct,
+      verdict,
+    });
+  }
+
   const squeezeOutcomes: Outcome[] = [];
   for (const sig of squeezeSignals) {
     const fwdEnd = sig.firedAtMs + config.lookaheadHours * 3600_000;
@@ -1639,6 +1733,7 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
     outcomes,
     pumpOutcomes,
     squeezeOutcomes,
+    postPumpOutcomes,
     allHours,
     priceByHour,
     fundingAprByHour,
@@ -1753,6 +1848,52 @@ ${"─".repeat(62)}`);
             : "😐";
         console.log(
           `  ${icon} ${sig.firedAtStr}  entry=$${(sig.entryPrice ?? 0).toFixed(4)}  pump+${sig.candlePumpPct.toFixed(1)}%  vol×${sig.volumeMultiple.toFixed(0)}  RSI:${sig.rsi}  funding:${(sig.fundingApr ?? 0).toFixed(1)}%APR`,
+        );
+        console.log(
+          `      max:${s(o.maxPricePct)}%  min:${s(o.minPricePct)}%  final:${s(o.finalPricePct)}%  → ${o.verdict}`,
+        );
+      }
+    }
+  }
+
+  // ── Post-pump reversal results ─────────────────────────────────────────────
+  const allPostPumpOutcomes = results.flatMap((r) => r.postPumpOutcomes);
+  if (allPostPumpOutcomes.length) {
+    for (const result of results) {
+      const { coin, postPumpOutcomes } = result;
+      if (!postPumpOutcomes.length) continue;
+      const dropped = postPumpOutcomes.filter(
+        (o) => o.verdict === "DROPPED",
+      ).length;
+      const pumpDump = postPumpOutcomes.filter(
+        (o) => o.verdict === "PUMP+DUMP",
+      ).length;
+      const squeezed = postPumpOutcomes.filter(
+        (o) => o.verdict === "SQUEEZED",
+      ).length;
+      const winRate = (
+        ((dropped + pumpDump) / postPumpOutcomes.length) *
+        100
+      ).toFixed(0);
+      console.log(`\n${"─".repeat(62)}`);
+      console.log(
+        `  ${coin} — POST-PUMP REVERSAL signals | ${postPumpOutcomes.length} fired`,
+      );
+      console.log(`${"─".repeat(62)}`);
+      console.log(`  Win rate:   ${winRate}%  (dropped + pump+dump)`);
+      console.log(
+        `  Dropped:    ${dropped}  Pump+dump: ${pumpDump}  Squeezed: ${squeezed}  Neutral: ${postPumpOutcomes.length - dropped - pumpDump - squeezed}`,
+      );
+      console.log();
+      for (const o of postPumpOutcomes) {
+        const sig = o.signal as PostPumpSignal;
+        const icon = ["DROPPED", "PUMP+DUMP"].includes(o.verdict)
+          ? "✅"
+          : o.verdict === "SQUEEZED"
+            ? "❌"
+            : "😐";
+        console.log(
+          `  ${icon} ${sig.firedAtStr}  entry=$${sig.entryPrice.toFixed(6)}  OI:${sig.oiDropPct.toFixed(1)}%  ${sig.hoursSincePump.toFixed(1)}h after pump (${sig.pumpFiredAtStr})`,
         );
         console.log(
           `      max:${s(o.maxPricePct)}%  min:${s(o.minPricePct)}%  final:${s(o.finalPricePct)}%  → ${o.verdict}`,

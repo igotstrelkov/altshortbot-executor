@@ -105,6 +105,8 @@ const BUILDING_REFIRE_MULTIPLIER = 2.0;
 // but it also blocked XION (+9.30%) and 1000XEC (+13.79%) which were winners.
 // Re-enable with a calibrated value once more pump-top-then-building cases accumulate.
 const PUMP_TOP_COOLDOWN_H = 0;
+const POST_PUMP_LOOKBACK_H = 12; // hours after pump top to watch for OI collapse
+const POST_PUMP_OI_DROP_PCT = 15; // OI must drop ≥10% from post-pump peak
 // Block BUILDING queue entry if OI increased >50% in squeeze window.
 // Negative oiDropPct means OI rose — squeeze still actively building.
 // Evidence: SOLV May-12 oiDropPct=-182.9% → SQUEEZED; flat OI (0%) → profitable.
@@ -177,6 +179,8 @@ interface CoinState {
   // Per-wave fired flags
   waveAlertedBuilding: boolean; // BUILDING fires once per wave (or re-fires if funding becomes 2× more extreme)
   lastPumpTopMs: number | null; // when last PUMP_TOP fired — gates BUILDING queue entry
+  postPumpOiPeak: number; // highest OI seen after last pump top
+  postPumpAlerted: boolean; // POST_PUMP_REVERSAL already fired for this pump wave
   lastBuildingFundingApr: number; // funding APR when last BUILDING fired — used for re-fire
   waveAlertedTrendBreak: boolean; // TREND_BREAK fires once per trending episode
   // Exhaustion: timestamp-based (6h minimum gap) — allows re-fire after early bad signal
@@ -225,6 +229,8 @@ function defaultState(): CoinState {
     waveAlertedBuilding: false,
     lastBuildingFundingApr: 0,
     lastPumpTopMs: null,
+    postPumpOiPeak: 0,
+    postPumpAlerted: false,
     waveAlertedTrendBreak: false,
     lastExhaustionMs: null,
     lastFundingAlertMs: null,
@@ -675,7 +681,10 @@ function scanCoin(
   // ── Pump top ──────────────────────────────────────────────────────────────
   const pump = detectPumpTop(candles, fRate);
   if (pump.triggered) {
-    newState.lastPumpTopMs = ts; // gate subsequent BUILDING signals
+    newState.lastPumpTopMs = ts;
+    newState.postPumpOiPeak =
+      oiHistory.length > 0 ? oiHistory[oiHistory.length - 1].oiUsd : 0;
+    newState.postPumpAlerted = false;
     alerts.push({
       coin,
       type: "PUMP_TOP",
@@ -687,6 +696,41 @@ function scanCoin(
       confidence: "HIGH",
       msSinceBuilding: null,
     });
+  }
+
+  // ── Post-pump OI collapse (POST_PUMP_REVERSAL) ────────────────────────────
+  // Crowded longs built during the pump are now capitulating (OI dropping).
+  // This is a confirmed reversal entry — more reliable than the pump top alone.
+  if (newState.lastPumpTopMs !== null && !newState.postPumpAlerted) {
+    const hoursSincePump = (ts - newState.lastPumpTopMs) / HOUR;
+    if (hoursSincePump > 0 && hoursSincePump <= POST_PUMP_LOOKBACK_H) {
+      const currentOI =
+        oiHistory.length > 0 ? oiHistory[oiHistory.length - 1].oiUsd : 0;
+      if (currentOI > newState.postPumpOiPeak)
+        newState.postPumpOiPeak = currentOI;
+      const oiDropPct =
+        newState.postPumpOiPeak > 0
+          ? ((currentOI - newState.postPumpOiPeak) / newState.postPumpOiPeak) *
+            100
+          : 0;
+      if (oiDropPct <= -POST_PUMP_OI_DROP_PCT) {
+        newState.postPumpAlerted = true;
+        alerts.push({
+          coin,
+          type: "POST_PUMP_REVERSAL",
+          firedAt: ts,
+          firedAtStr: fmtDate(ts),
+          entry: price,
+          fundingApr,
+          details: `OI: ${oiDropPct.toFixed(1)}% from peak | ${hoursSincePump.toFixed(1)}h after pump`,
+          confidence: "HIGH",
+          msSinceBuilding: null,
+        });
+      }
+    } else if (hoursSincePump > POST_PUMP_LOOKBACK_H) {
+      newState.postPumpOiPeak = 0;
+      newState.postPumpAlerted = false;
+    }
   }
 
   // ── Trend filter ──────────────────────────────────────────────────────────
@@ -1067,7 +1111,9 @@ async function main(): Promise<void> {
         // Skip if a PUMP_TOP fired recently — squeeze is still accelerating
         !alert.recentPumpTop;
 
-      if (isExhaustionOrBreak || isExtremeBuilding) {
+      const isPostPumpReversal = alert.type === "POST_PUMP_REVERSAL";
+
+      if (isExhaustionOrBreak || isExtremeBuilding || isPostPumpReversal) {
         appendToQueue(alert);
       }
     }
