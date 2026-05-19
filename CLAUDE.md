@@ -322,6 +322,40 @@ More extreme funding = more violent reversal = higher conviction. Cap total conc
 
 ---
 
+## Pending decisions — needs more data
+
+These are patterns identified from live signals that warrant parameter changes or new features, but don't yet have enough evidence to act on. Review after 20+ live signals.
+
+### Gate parameters
+
+**OI threshold (-150%) may need tightening**
+Two signals in the -130% to -150% OI range stopped out at ~13% adverse excursion:
+
+- AIGENSYN: OI -138%, funding -465% → stopped out (+13.40% pump)
+- FIDA May 17: OI -144.1%, funding -1177% → stopped out (+13.43% pump)
+  MBOX at OI -133%, funding -1354% → +30% winner complicates tightening to -120%. The difference between -133% (winner) and -138% (loser) is only 5% — too small to calibrate reliably. **Action:** wait for 5-10 more signals in the -100% to -150% OI range. If stop-outs continue to cluster there, raise threshold to -120%.
+
+**PUMP_TOP_COOLDOWN_H = 0 may need re-enabling**
+Two stop-outs had a pump top firing hours before the BUILDING signal:
+
+- AIGENSYN: pump top 2h before BUILDING → stopped out
+- FIDA: pump top 3h before BUILDING → stopped out
+  Pattern: pump top + BUILDING in same wave = squeeze still active = bad entry. But cooldown was disabled because it blocked XION (+9.30%) and 1000XEC (+13.79%). **Action:** track how many future stop-outs were preceded by a pump top within 4-6h. If pattern holds, re-enable with a 4-6h window.
+
+### Active signals to monitor (May 18, 2026)
+
+- **FIDA exhaustion** — fired May 18 22:00. Funding normalised from -2978% to 0%. First exhaustion signal seen live. 48h outcome pending — track whether it marks a clean reversal entry.
+- **POLYX near-miss** — 6× in `near_miss.jsonl` at 17.5% cumulative, OI still rising (-65% to -82%). Watch for OI to flatten — should fire a clean BUILDING when squeeze peaks.
+- **RONIN** — BUILDING blocked (OI -626.1%, funding -5291% APR). Watch for exhaustion signal when squeeze peaks — could be a very clean entry.
+
+### Features pending calibration data
+
+- **Trailing stops** — implement after 20+ live signals. Study peak-vs-final gap in `bybit_positions.json` to calibrate trail distance.
+- **15m candles** — check `near_miss.jsonl` after 4-6 weeks. If `candleHighGapPct` is consistently >5% on BUILDING signals, investigate.
+- **Tiered sizing** — only after trailing stops working and 20+ live signals.
+
+---
+
 ## Deviations from original HL plan
 
 | Where               | Original                                        | Shipped                                                         | Rationale                                                 |

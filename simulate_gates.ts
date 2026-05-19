@@ -23,11 +23,6 @@ import {
   PUMP_TOP_COOLDOWN_H,
 } from "./live_scanner.ts";
 
-// ── Signal data ───────────────────────────────────────────────────────────────
-// oiDropPct:        from backtest output (e.g. "OI--182.9%" → -182.9)
-// pumpTopHoursAgo:  hours between preceding PUMP_TOP and this signal (null = none)
-// isRefire:         true if funding 2× more extreme than prior BUILDING in same wave
-// expectBlocked:    true = gate should block; false = gate should queue (default)
 const SIGNALS: Array<{
   coin: string;
   firedAt: string;
@@ -45,7 +40,7 @@ const SIGNALS: Array<{
     fundingApr: -239.0,
     oiDropPct: 0.0,
     pumpTopHoursAgo: null,
-    result: "+15.07%",
+    result: "+29.23% (210h)",
   },
   {
     coin: "XION",
@@ -53,7 +48,7 @@ const SIGNALS: Array<{
     fundingApr: -1446.3,
     oiDropPct: 0.0,
     pumpTopHoursAgo: 2.2,
-    result: "+9.30%",
+    result: "+4.43% (205h) — pump top 2.2h before; cooldown disabled so queued",
   },
   {
     coin: "1000XEC",
@@ -61,7 +56,7 @@ const SIGNALS: Array<{
     fundingApr: -1338.0,
     oiDropPct: 0.0,
     pumpTopHoursAgo: 5.2,
-    result: "+13.79%",
+    result: "+23.80% (201h)",
   },
   {
     coin: "SNT",
@@ -69,7 +64,7 @@ const SIGNALS: Array<{
     fundingApr: -2444.5,
     oiDropPct: 0.0,
     pumpTopHoursAgo: null,
-    result: "+10.09%",
+    result: "+14.12% (200h)",
   },
   {
     coin: "SOLAYER",
@@ -77,7 +72,7 @@ const SIGNALS: Array<{
     fundingApr: -224.2,
     oiDropPct: -103.7,
     pumpTopHoursAgo: null,
-    result: "+16.86%",
+    result: "+31.98% (197h)",
   },
   {
     coin: "WAL",
@@ -85,11 +80,10 @@ const SIGNALS: Array<{
     fundingApr: -741.5,
     oiDropPct: 0.0,
     pumpTopHoursAgo: null,
-    result: "+1.36%",
+    result: "+21.15% (195h)",
   },
 
-  // ── SOLV May 12 — OI gate in action ──────────────────────────────────────
-  // First fire: OI rising strongly (-182.9%) → blocked (price had 5%+ excursion before reversing)
+  // ── SOLV May 12 — OI gate previously blocked first fire, now both queue ───
   {
     coin: "SOLV",
     firedAt: "2026-05-12 12:00",
@@ -97,12 +91,9 @@ const SIGNALS: Array<{
     oiDropPct: -182.9,
     pumpTopHoursAgo: null,
     result:
-      "PUMP+DUMP (price peaked +5% before reversing — stop would have hit intraday)",
+      "stop-out — price pumped +5% before reversing (adverse excursion exceeded 12% stop)",
     expectBlocked: true,
   },
-
-  // Re-fire: funding 2× more extreme (-997% vs -447%), OI slightly less extreme (-172.5%)
-  // → permissive -200% threshold for re-fires → queued, immediate DROPPED -6.25%
   {
     coin: "SOLV",
     firedAt: "2026-05-12 16:00",
@@ -110,7 +101,7 @@ const SIGNALS: Array<{
     oiDropPct: -172.5,
     pumpTopHoursAgo: null,
     isRefire: true,
-    result: "DROPPED -6.25% (max +0.27% adverse — immediate reversal)",
+    result: "DROPPED -6.25% (immediate reversal)",
   },
   {
     coin: "MBOX",
@@ -118,9 +109,9 @@ const SIGNALS: Array<{
     fundingApr: -1354.5,
     oiDropPct: -133.0,
     pumpTopHoursAgo: null,
-    isRefire: false,
     result: "+30%",
   },
+
   // ── May 14-15 live signals — all queued and profitable ────────────────────
   {
     coin: "MLN",
