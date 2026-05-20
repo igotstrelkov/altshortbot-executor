@@ -49,8 +49,6 @@ const RISK = {
   stopLossPct: 0.12,
   maxPositions: 5, // was 3
   timeoutH: 72, // was 48
-  trailActivatePct: 5, // new
-  trailDistancePct: 4, // new
 } as const;
 
 const QUEUE_FILE = "signal_queue.json";

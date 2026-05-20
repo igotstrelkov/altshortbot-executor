@@ -1,7 +1,36 @@
+# Dependencies
 node_modules/
+
+# Environment — never commit API keys
+.env
+
+# PM2 logs
 logs/
+
+# Runtime state — short bot
 scanner_state.json
 signal_queue.json
+bybit_positions.json
+
+# Runtime state — long bot
+long_scanner_state.json
+long_queue.json
+long_positions.json
+
+# Runtime logs
+building_log.jsonl
+near_miss.jsonl
+
+# Legacy (Hyperliquid)
 hl_positions.json
 paper_trades.jsonl
-.env
+
+# Chart outputs
+backtest_chart.html
+backtest_longs_chart.html
+
+# Temp test output
+/tmp/bt_test_*.json
+
+# OS
+.DS_Store

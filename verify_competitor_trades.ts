@@ -32,7 +32,7 @@ const COMPETITOR_TRADES: CompetitorTrade[] = [
 // ── Parameters (validated set) ────────────────────────────────────────────────
 const BACKTEST_ARGS = [
   "--days",
-  "60",
+  "90", // ← cover older trades
   "--threshold",
   "10",
   "--min-positive",
@@ -42,7 +42,7 @@ const BACKTEST_ARGS = [
   "--max-price",
   "2",
   "--pump-pct",
-  "25",
+  "19", // ← fix from 25
   "--pump-vol",
   "5",
   "--pump-rsi",
@@ -59,12 +59,11 @@ const BACKTEST_ARGS = [
   "0",
   "--exhaust-funding",
   "-20",
-  // NOTE: --exhaust-oi-drop intentionally omitted here.
-  // Bybit OI covers only ~8 days; signals older than that would be blocked,
-  // making this a test of OI data coverage rather than signal detection.
-  // The live scanner always has fresh OI so the filter works correctly in production.
+  "--exhaust-oi-drop",
+  "0", // ← explicitly 0: Bybit OI only covers ~8 days,
+  //   requiring a drop blocks all historical signals
   "--source",
-  "bybit", // matches live scanner data source
+  "bybit",
   "--lookahead",
   "48",
 ];
