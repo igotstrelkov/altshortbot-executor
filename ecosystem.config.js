@@ -82,5 +82,27 @@ module.exports = {
         // BYBIT_TESTNET:     "1",        // uncomment to use testnet
       },
     },
+    {
+      name: "altshortbot-digest",
+
+      // Heartbeat + 24h P&L summary. Catches silent failures (e.g. scanner
+      // stopped firing, executor not running) by checking file mtimes.
+      script: "npx",
+      args: "tsx daily_digest.ts",
+
+      // Daily at 09:00 UTC
+      cron_restart: "0 9 * * *",
+      autorestart: false,
+
+      out_file: "logs/digest.log",
+      error_file: "logs/digest-error.log",
+      time: true,
+
+      env: {
+        NODE_ENV: "production",
+        TELEGRAM_TOKEN: process.env.TELEGRAM_TOKEN ?? "",
+        TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID ?? "",
+      },
+    },
   ],
 };

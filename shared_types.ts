@@ -31,6 +31,8 @@ export interface PositionRecord {
   signalConfidence: "HIGH" | "MEDIUM";
   stopOid?: number;
   isPaper: boolean;
+  /** True between order submission and confirmed fill. Reconciled on next run. */
+  pending?: boolean;
 }
 
 export type PositionStore = Record<string, PositionRecord>;

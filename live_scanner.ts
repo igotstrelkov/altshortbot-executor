@@ -1,4 +1,10 @@
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "fs";
+import {
+  appendFileSync,
+  existsSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "fs";
 import { fileURLToPath } from "url";
 import { logBuildingSignal } from "./check_building_signals.ts";
 import type { Alert, QueuedSignal } from "./shared_types.ts";
@@ -193,6 +199,17 @@ const floorH = (ms: number) => Math.floor(ms / HOUR) * HOUR;
 const avgArr = (arr: number[]) =>
   arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
 
+/**
+ * Atomic file write: temp + rename. POSIX rename is atomic, so any concurrent
+ * reader sees either the previous complete file or the new complete file —
+ * never a truncated state from a partial write or crash mid-write.
+ */
+function atomicWrite(path: string, data: string): void {
+  const tmp = `${path}.tmp.${process.pid}`;
+  writeFileSync(tmp, data, "utf8");
+  renameSync(tmp, path);
+}
+
 function fmtDate(ms: number): string {
   return new Date(ms).toISOString().slice(0, 16).replace("T", " ");
 }
@@ -242,7 +259,7 @@ function loadState(): Record<string, CoinState> {
 }
 
 function saveState(state: Record<string, CoinState>): void {
-  writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), "utf8");
+  atomicWrite(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
 // ─── Signal queue (consumed by hl_executor.ts) ───────────────────────────────
@@ -261,7 +278,7 @@ function appendToQueue(alert: Alert): void {
   }
 
   queue.push({ ...alert, queuedAt: Date.now() });
-  writeFileSync(QUEUE_FILE, JSON.stringify(queue, null, 2), "utf8");
+  atomicWrite(QUEUE_FILE, JSON.stringify(queue, null, 2));
 }
 
 // ─── HTTP helper ──────────────────────────────────────────────────────────────

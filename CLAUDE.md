@@ -25,8 +25,9 @@ Communication is **file-only**: `signal_queue.json` and `bybit_positions.json`. 
 | --------------------- | ------------------------------------------------------------------------ |
 | `live_scanner.ts`     | Scanner — signal detection, Telegram alerts, queue writes                |
 | `bybit_executor.ts`   | Executor — order placement, position management, stop tracking           |
+| `daily_digest.ts`     | Heartbeat — 24h P&L digest + stale-state alerts, runs once daily         |
 | `shared_types.ts`     | Shared TypeScript interfaces (Alert, QueuedSignal, PositionRecord, etc.) |
-| `ecosystem.config.js` | PM2 process config for scanner + executor                                |
+| `ecosystem.config.js` | PM2 process config for scanner + executor + digest                       |
 
 ### Research tools (read-only from production perspective)
 
@@ -58,6 +59,8 @@ Communication is **file-only**: `signal_queue.json` and `bybit_positions.json`. 
 | `building_log.jsonl`   | Scanner    | Append-only log of every BUILDING signal for monitoring                   |
 | `near_miss.jsonl`      | Scanner    | Coins that hit 15-19% cumulative but didn't trigger — 15m candle analysis |
 
+All non-append state files are written via `atomicWrite` (temp + rename). POSIX rename is atomic, so a concurrent reader or a process killed mid-write never sees a truncated file — only the previous or new complete state.
+
 ---
 
 ## ⚠️ Do not rules
@@ -75,6 +78,10 @@ These are the most common ways to break the system:
 5. **Do not rebuild `backtest_signals.ts`, `backtest_test.ts`, or `fixtures/`** from scratch — fixture expectations are calibrated to specific behaviour.
 
 6. **Do not add `console.log` calls to the scanner's main scan loop** without checking if `--dry-run` suppresses them — the `logBuildingSignal` call checks `!DRY_RUN`.
+
+7. **Do not write to state files (`scanner_state.json`, `bybit_positions.json`, `signal_queue.json`) with raw `writeFileSync`** — use the `atomicWrite` helper. A plain write that gets killed mid-flush leaves a truncated file and `JSON.parse` falls through to the empty-default branch, silently losing all state.
+
+8. **Do not remove the `reconcileWithExchange` call at the top of `bybit_executor.ts`'s `main()`** — it resolves `pending: true` records left by a crash mid-order, and surfaces orphan Bybit positions the executor doesn't know about. Without it, a position opened just before a crash becomes invisible: the executor won't manage it, and the next signal for the same coin will open a second one.
 
 ---
 
@@ -132,13 +139,18 @@ npx tsx check_near_misses.ts --days 7             # last 7 days of near-misses
 npx tsx check_near_misses.ts --all                # all time
 
 # ─── PM2 ────────────────────────────────────────────────────────────────────
-pm2 status                                        # process health
-pm2 restart all                                   # restart both processes
+pm2 status                                        # process health (scanner + executor + digest)
+pm2 restart all                                   # restart all three processes
 pm2 restart altshortbot-scanner                   # restart scanner only
 pm2 restart altshortbot-executor                  # restart executor only
+pm2 restart altshortbot-digest                    # restart digest only
 pm2 logs altshortbot-scanner --lines 50           # scanner logs
 pm2 logs altshortbot-executor --lines 50          # executor logs
+pm2 logs altshortbot-digest --lines 50            # digest logs
 pm2 save                                          # persist process list across reboots
+
+# ─── Daily digest ────────────────────────────────────────────────────────────
+npx tsx daily_digest.ts                           # send digest now (heartbeat + 24h P&L)
 
 # ─── Backtest ────────────────────────────────────────────────────────────────
 npx tsx backtest_signals.ts --coin ORDI --days 60 --chart   # default: Bybit source
@@ -239,6 +251,9 @@ Uses `bybit-api` npm SDK. HMAC auth handled automatically.
 - **`closePosition`** uses `qty: "0"` + `reduceOnly: true` + `closeOnTrigger: true` to close full position
 - **`clearQueue`** runs **after** `fetchAccountEquity` succeeds — signals preserved on API failure
 - **Exchange-closed detection**: `getPositionInfo` returns `size: "0"` when stop triggered by exchange
+- **Provisional records**: `executeSignal` writes the `PositionRecord` with `pending: true` **before** calling `submitOrder`, then refreshes it with the actual fill price afterward. If the process is killed between submit and response, the next run's reconcile step resolves the record.
+- **Reconciliation on every run**: `reconcileWithExchange` runs at the top of `main()`. It queries Bybit's actual open USDT-linear positions via `getPositionInfo({ settleCoin: "USDT" })`, then: promotes `pending` records that match an exchange position; drops `pending` records that don't; Telegram-alerts on any exchange position with no matching record (orphan).
+- **Actual fill price capture**: After `submitOrder` returns an `orderId`, `fetchActualFillPrice` queries `getExecutionList` and computes volume-weighted avg execution price. `entryPx`, `sizeCoin`, and `stopLossPx` on the persisted record reflect actual fill, not the queued signal price — important on volatile alts where market-order slippage can be several percent.
 
 ### Paper vs demo vs live
 

@@ -25,7 +25,7 @@
  */
 
 import { RestClientV5 } from "bybit-api";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { fileURLToPath } from "url";
 import type {
   PaperTrade,
@@ -45,10 +45,10 @@ const PAPER_ACCOUNT = parseFloat(process.env.BYBIT_PAPER_ACCOUNT ?? "10000");
 
 const RISK = {
   maxLeverage: 3,
-  riskPerTrade: 0.02,
+  riskPerTrade: 0.02, // was 0.02
   stopLossPct: 0.12,
-  maxPositions: 5,
-  timeoutH: 48,
+  maxPositions: 5, // was 3
+  timeoutH: 48, // was 48
 } as const;
 
 const QUEUE_FILE = "signal_queue.json";
@@ -95,6 +95,17 @@ async function alertError(ctx: string, err: unknown): Promise<void> {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * Atomic file write: temp + rename. POSIX rename is atomic, so any concurrent
+ * reader sees either the previous complete file or the new complete file —
+ * never a truncated state from a partial write or crash mid-write.
+ */
+function atomicWrite(path: string, data: string): void {
+  const tmp = `${path}.tmp.${process.pid}`;
+  writeFileSync(tmp, data, "utf8");
+  renameSync(tmp, path);
+}
 
 async function fetchJSON(url: string): Promise<unknown> {
   const res = await fetch(url);
@@ -183,7 +194,7 @@ function loadPositions(): BybitPositionStore {
 }
 
 function savePositions(store: BybitPositionStore): void {
-  writeFileSync(POSITIONS_FILE, JSON.stringify(store, null, 2), "utf8");
+  atomicWrite(POSITIONS_FILE, JSON.stringify(store, null, 2));
 }
 
 // ─── Signal queue ──────────────────────────────────────────────────────────────
@@ -197,7 +208,7 @@ function loadQueue(): QueuedSignal[] {
 }
 
 function clearQueue(): void {
-  writeFileSync(QUEUE_FILE, "[]", "utf8");
+  atomicWrite(QUEUE_FILE, "[]");
 }
 
 // ─── Account state ─────────────────────────────────────────────────────────────
@@ -362,6 +373,105 @@ async function fetchActualClosePrice(
   }
 }
 
+/**
+ * Volume-weighted actual fill price for a given orderId. For opens, this gives
+ * the true entry so P&L accounting matches reality even when the market order
+ * slips against the queued signal price.
+ */
+async function fetchActualFillPrice(
+  coin: string,
+  orderId: string,
+  fallback: number,
+): Promise<number> {
+  if (IS_PAPER || orderId === "PAPER") return fallback;
+  try {
+    const res = await client.getExecutionList({
+      category: "linear",
+      symbol: `${coin}USDT`,
+      orderId,
+      limit: 20,
+    });
+    const fills = (res.result?.list ?? []) as Array<{
+      execQty?: string;
+      execPrice?: string;
+    }>;
+    if (!fills.length) return fallback;
+    let qty = 0;
+    let value = 0;
+    for (const f of fills) {
+      const q = parseFloat(f.execQty ?? "0");
+      const p = parseFloat(f.execPrice ?? "0");
+      qty += q;
+      value += q * p;
+    }
+    return qty > 0 ? value / qty : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * Reconcile store.open against Bybit's actual open positions. Handles:
+ *   1. Pending records: if the exchange has the position, promote to live; if
+ *      not, drop the record (order never filled).
+ *   2. Orphans: exchange has a position with no matching record — alert.
+ *
+ * Live-side closes (stop hit, manual close) are NOT handled here — they're
+ * already covered by managePositions via fetchLivePositionSize.
+ */
+async function reconcileWithExchange(store: BybitPositionStore): Promise<void> {
+  if (IS_PAPER) {
+    // Paper has no exchange truth — just clear any leftover pending flags
+    for (const pos of Object.values(store.open)) {
+      if (pos.pending) pos.pending = false;
+    }
+    return;
+  }
+
+  let exchangePositions: Array<{ symbol: string; size: string }> = [];
+  try {
+    const res = await client.getPositionInfo({
+      category: "linear",
+      settleCoin: "USDT",
+    });
+    exchangePositions = ((res.result?.list ?? []) as any[]).filter(
+      (p) => parseFloat(p.size ?? "0") > 0,
+    );
+  } catch (e) {
+    await alertError("reconcileWithExchange", e);
+    return; // bail rather than make wrong inferences
+  }
+
+  const exchangeCoins = new Set(
+    exchangePositions.map((p) => p.symbol.replace("USDT", "")),
+  );
+
+  // Resolve pending records
+  for (const [coin, pos] of Object.entries(store.open)) {
+    if (!pos.pending) continue;
+    if (exchangeCoins.has(coin)) {
+      console.log(`  ${coin}: pending → confirmed (found on exchange)`);
+      store.open[coin] = { ...pos, pending: false };
+    } else {
+      console.log(`  ${coin}: pending dropped (no exchange position)`);
+      delete store.open[coin];
+    }
+  }
+
+  // Orphans
+  for (const exch of exchangePositions) {
+    const coin = exch.symbol.replace("USDT", "");
+    if (!store.open[coin]) {
+      await sendTelegram(
+        `⚠️ *altshortbot* — orphan position\n` +
+          `*${coin}* on Bybit but not in store. ` +
+          `Size: ${exch.size}. Verify on app.bybit.com.`,
+      );
+      console.warn(`  ORPHAN: ${coin} on exchange, no record`);
+    }
+  }
+}
+
 // ─── Position management ───────────────────────────────────────────────────────
 async function managePositions(store: BybitPositionStore): Promise<void> {
   const nowMs = Date.now();
@@ -467,6 +577,7 @@ async function executeSignal(
   const riskUsdt = equity * RISK.riskPerTrade;
   const notional = riskUsdt / RISK.stopLossPct; // e.g. $200 / 0.12 = $1,667
   const stopPx = entry * (1 + RISK.stopLossPct);
+  const sizeCoin = notional / entry;
 
   // Set leverage before entry
   const levOk = await setLeverage(coin, leverage, instr.maxLev);
@@ -475,18 +586,10 @@ async function executeSignal(
     return;
   }
 
-  const orderId = await openShort(
-    coin,
-    entry,
-    notional,
-    stopPx,
-    leverage,
-    instr,
-  );
-  if (!orderId) return;
-
-  const sizeCoin = notional / entry;
-  const record: PositionRecord = {
+  // Write a provisional record BEFORE submitting the order. If the process
+  // dies between submit and response, reconcileWithExchange on the next run
+  // will either promote this to live (if the order filled) or drop it.
+  const provisional: PositionRecord = {
     coin,
     openedAt: Date.now(),
     entryPx: entry,
@@ -498,20 +601,57 @@ async function executeSignal(
     signalType: signalType as PositionRecord["signalType"],
     signalConfidence: confidence as PositionRecord["signalConfidence"],
     isPaper: IS_PAPER,
+    pending: true,
+  };
+  store.open[coin] = provisional;
+  savePositions(store); // persisted before the order is in flight
+
+  const orderId = await openShort(
+    coin,
+    entry,
+    notional,
+    stopPx,
+    leverage,
+    instr,
+  );
+  if (!orderId) {
+    delete store.open[coin];
+    savePositions(store);
+    return;
+  }
+
+  // Wait briefly for fills to settle, then capture the actual avg fill price
+  // so entry / sizeCoin / stopLossPx reflect what actually happened — not the
+  // queued signal price, which can diverge meaningfully on volatile alts.
+  await sleep(500);
+  const fillPx = await fetchActualFillPrice(coin, orderId, entry);
+  const actualSize = notional / fillPx;
+  const actualStop = fillPx * (1 + RISK.stopLossPct);
+
+  store.open[coin] = {
+    ...provisional,
+    entryPx: fillPx,
+    sizeCoin: actualSize,
+    stopLossPx: actualStop,
+    pending: false,
     ...(orderId !== "PAPER" ? { stopOid: undefined } : {}),
   };
+  savePositions(store);
 
-  store.open[coin] = record;
-
+  const slipPct = ((fillPx - entry) / entry) * 100;
+  const slipNote =
+    Math.abs(slipPct) > 0.01
+      ? ` (slip ${slipPct >= 0 ? "+" : ""}${slipPct.toFixed(2)}%)`
+      : "";
   const mode = IS_PAPER ? "📄 " : "";
   await sendTelegram(
     `${mode}📉 *${coin}* SHORT opened\n` +
-      `Entry: $${entry.toFixed(6)} | Stop: $${stopPx.toFixed(6)}\n` +
+      `Entry: $${fillPx.toFixed(6)}${slipNote} | Stop: $${actualStop.toFixed(6)}\n` +
       `Signal: ${signalType} (${confidence}) | Funding: ${fundingApr.toFixed(0)}% APR\n` +
       `Notional: $${notional.toFixed(0)} | Leverage: ${leverage}×`,
   );
   console.log(
-    `  ${coin}: SHORT opened — entry $${entry.toFixed(6)} stop $${stopPx.toFixed(6)} ` +
+    `  ${coin}: SHORT opened — fill $${fillPx.toFixed(6)} stop $${actualStop.toFixed(6)} ` +
       `notional $${notional.toFixed(0)} (${IS_PAPER ? "PAPER" : "LIVE"})`,
   );
 }
@@ -567,6 +707,16 @@ async function main(): Promise<void> {
   if (IS_STATUS) {
     await printStatus(store);
     return;
+  }
+
+  // ── Reconcile with exchange before any state-mutating work ──────────────────
+  // Resolves pending records (from a previous crash mid-order) and surfaces
+  // any orphan positions on Bybit that the executor doesn't know about.
+  try {
+    await reconcileWithExchange(store);
+    savePositions(store);
+  } catch (e) {
+    await alertError("reconcileWithExchange", e);
   }
 
   // ── Manage existing positions ───────────────────────────────────────────────
