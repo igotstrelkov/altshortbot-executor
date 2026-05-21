@@ -46,7 +46,7 @@ const PAPER_ACCOUNT = parseFloat(process.env.BYBIT_PAPER_ACCOUNT ?? "10000");
 const RISK = {
   maxLeverage: 3,
   riskPerTrade: 0.02, // was 0.02
-  stopLossPct: 0.12,
+  stopLossPct: 0.2,
   maxPositions: 5, // was 3
   timeoutH: 48, // was 48
 } as const;

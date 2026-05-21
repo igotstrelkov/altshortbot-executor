@@ -29,6 +29,8 @@ interface BuildingSignal {
   fundingApr: number;
   squeeze: number;
   candleHighGapPct?: number; // % between candle high and close at signal time
+  oiDropPct?: number; // OI metric at signal time (more negative = OI rising)
+  oiGateWouldBlock?: boolean; // true if the OI gate would have rejected this
 }
 
 // ── Today's 5 signals (seed data) ────────────────────────────────────────────

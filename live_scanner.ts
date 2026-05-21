@@ -124,6 +124,17 @@ const BUILDING_OI_RISING_MAX = -150;
 // Evidence: SOLV May-12 16:00 re-fire at -997% APR (OI -172.5%) dropped
 // immediately (+0.27% max adverse); first-fire (OI -182.9%) had 5%+ excursion.
 const BUILDING_OI_RISING_MAX_REFIRE = -200;
+// GATE BYPASS (testnet) — false = OI gate OFF: every extreme-funding BUILDING
+// signal queues regardless of OI. true = OI gate active (normal behaviour).
+// ⚠️ Hardcoded: there is NO safe default. If this file is deployed to a
+// live-money instance it runs with the OI gate disabled. Set true before live.
+const OI_GATE_ENABLED = false;
+// GATE BYPASS (testnet) — false = funding gate OFF: BUILDING signals with
+// funding milder than -200% APR (the "await exhaustion" / WAIT signals) also
+// queue. true = funding gate active (normal). These are the mega-squeeze-prone
+// signals the -200% threshold normally excludes — see FUNDING_THRESHOLD above.
+// ⚠️ Hardcoded: no safe default — see the OI_GATE_ENABLED note.
+const FUNDING_GATE_ENABLED = false;
 const MIN_EXHAUSTION_GAP_H = 6; // Exhaustion re-fire minimum gap (hours)
 const STATE_FILE = "scanner_state.json";
 const BB_BASE = "https://api.bybit.com";
@@ -898,23 +909,32 @@ function formatAlert(alert: Alert): string {
       : BUILDING_OI_RISING_MAX;
     const oiRising = (alert.oiDropPct ?? 0) < oiThreshold;
     const pumpCooldown = alert.recentPumpTop === true;
-    if (alert.fundingApr <= -200 && !oiRising && !pumpCooldown) {
+    if (alert.fundingApr <= FUNDING_THRESHOLD && !oiRising && !pumpCooldown) {
       lines.push("", `📐 Short entry — extreme funding squeeze (auto-queued)`);
-    } else if (alert.fundingApr <= -200 && pumpCooldown) {
+    } else if (alert.fundingApr <= FUNDING_THRESHOLD && pumpCooldown) {
       lines.push(
         "",
         `⚠️ Pump top fired recently — squeeze still accelerating (not queued)`,
       );
-    } else if (alert.fundingApr <= -200 && oiRising) {
+    } else if (alert.fundingApr <= FUNDING_THRESHOLD && oiRising) {
       const refireNote = alert.isRefire
         ? " (re-fire: -200% threshold applied)"
         : "";
       lines.push(
         "",
-        `⚠️ Extreme funding but OI rising — squeeze still building (not queued)${refireNote}`,
+        OI_GATE_ENABLED
+          ? `⚠️ Extreme funding but OI rising — squeeze still building (not queued)${refireNote}`
+          : `🧪 Extreme funding + OI rising — OI gate BYPASSED, queued anyway${refireNote}`,
       );
     } else {
-      lines.push("", `⏳ Do NOT short yet — await exhaustion signal`);
+      lines.push(
+        "",
+        FUNDING_GATE_ENABLED
+          ? `⏳ Do NOT short yet — await exhaustion signal`
+          : pumpCooldown
+            ? `⚠️ Pump top fired recently — squeeze still accelerating (not queued)`
+            : `🧪 Funding milder than -200% — funding gate BYPASSED, queued anyway`,
+      );
     }
   }
   if (alert.type === "TREND_BREAK")
@@ -1060,10 +1080,12 @@ async function main(): Promise<void> {
 
     // Queue tradeable signals for the executor.
     //   • HIGH/MEDIUM EXHAUSTION & TREND_BREAK — the original tradeable set.
-    //   • BUILDING with fundingApr ≤ -200% APR — validated profitable: 9/9
-    //     paper-observed winners over 10d (avg +11% at 1×, ~+33% at 3×).
-    //     Above -200% (e.g. -100%) entered mega-squeezes where price ran
-    //     80%+ higher before reversing, so they're excluded.
+    //   • BUILDING — gated by isExtremeBuilding below.
+    // Normal (gates on): only BUILDING with fundingApr ≤ -200% APR and OI not
+    // rising — validated 9/9 paper winners over 10d (avg +11% at 1×, ~+33% at
+    // 3×); milder funding entered mega-squeezes that ran 80%+ before reversing.
+    // ⚠️ CURRENT (testnet): OI_GATE_ENABLED and FUNDING_GATE_ENABLED are both
+    // false, so EVERY BUILDING signal queues — see those constants above.
     // LOW confidence stays Telegram-only — too risky for auto-execution.
     // DRY_RUN suppresses queue writes so a hand-triggered scan can't bleed into
     // the executor's pickup. Telegram still fires (above) for observability.
@@ -1074,13 +1096,14 @@ async function main(): Promise<void> {
 
       const isExtremeBuilding =
         alert.type === "BUILDING" &&
-        alert.fundingApr <= -200 &&
+        (!FUNDING_GATE_ENABLED || alert.fundingApr <= FUNDING_THRESHOLD) &&
         // OI gate: re-fires use a more permissive threshold (-200%) since
         // 2× funding intensity is already a strong quality signal.
-        (alert.oiDropPct ?? 0) >=
-          (alert.isRefire
-            ? BUILDING_OI_RISING_MAX_REFIRE
-            : BUILDING_OI_RISING_MAX) &&
+        (!OI_GATE_ENABLED || // OI_GATE=off short-circuits the gate (testnet)
+          (alert.oiDropPct ?? 0) >=
+            (alert.isRefire
+              ? BUILDING_OI_RISING_MAX_REFIRE
+              : BUILDING_OI_RISING_MAX)) &&
         // Skip if a PUMP_TOP fired recently — squeeze is still accelerating
         !alert.recentPumpTop;
 
@@ -1101,6 +1124,12 @@ async function main(): Promise<void> {
         fundingApr: alert.fundingApr,
         squeeze: squeezeMatch ? parseFloat(squeezeMatch[1]) : 0,
         candleHighGapPct: alert.candleHighGapPct,
+        oiDropPct: alert.oiDropPct ?? 0,
+        oiGateWouldBlock:
+          (alert.oiDropPct ?? 0) <
+          (alert.isRefire
+            ? BUILDING_OI_RISING_MAX_REFIRE
+            : BUILDING_OI_RISING_MAX),
       });
     }
   }
