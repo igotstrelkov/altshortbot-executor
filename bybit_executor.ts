@@ -459,17 +459,17 @@ async function reconcileWithExchange(store: BybitPositionStore): Promise<void> {
   }
 
   // Orphans
-  for (const exch of exchangePositions) {
-    const coin = exch.symbol.replace("USDT", "");
-    if (!store.open[coin]) {
-      await sendTelegram(
-        `⚠️ *altshortbot* — orphan position\n` +
-          `*${coin}* on Bybit but not in store. ` +
-          `Size: ${exch.size}. Verify on app.bybit.com.`,
-      );
-      console.warn(`  ORPHAN: ${coin} on exchange, no record`);
-    }
-  }
+  // for (const exch of exchangePositions) {
+  //   const coin = exch.symbol.replace("USDT", "");
+  //   if (!store.open[coin]) {
+  //     await sendTelegram(
+  //       `⚠️ *altshortbot* — orphan position\n` +
+  //         `*${coin}* on Bybit but not in store. ` +
+  //         `Size: ${exch.size}. Verify on app.bybit.com.`,
+  //     );
+  //     console.warn(`  ORPHAN: ${coin} on exchange, no record`);
+  //   }
+  // }
 }
 
 // ─── Position management ───────────────────────────────────────────────────────
