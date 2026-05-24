@@ -135,6 +135,13 @@ const OI_GATE_ENABLED = false;
 // signals the -200% threshold normally excludes — see FUNDING_THRESHOLD above.
 // ⚠️ Hardcoded: no safe default — see the OI_GATE_ENABLED note.
 const FUNDING_GATE_ENABLED = false;
+// EXHAUSTION/TREND_BREAK disabled pending reversal-detector redesign.
+// The isExhausting logic (calm candles + normalised funding + lower high)
+// cannot distinguish a mid-parabola pause from a real top, and cannot fire
+// on a violent reversal at all — it false-fired into +75%/+86% continuations
+// on BSB. false = EXHAUSTION/TREND_BREAK produce no alerts (BUILDING is
+// unaffected). Re-enable only once the reversal detector is built + backtested.
+const EXHAUSTION_ENABLED = false;
 const MIN_EXHAUSTION_GAP_H = 6; // Exhaustion re-fire minimum gap (hours)
 const STATE_FILE = "scanner_state.json";
 const BB_BASE = "https://api.bybit.com";
@@ -762,11 +769,14 @@ function scanCoin(
       newState.squeezeWaveHighPrice = price;
 
     const isTrendBreak =
+      EXHAUSTION_ENABLED &&
       trending &&
       sq.phase === "EXHAUSTION" &&
       newState.lastBuildingMinFunding <= PARAMS.trendBreakFundingApr;
     const allowNormal =
-      !trending && (sq.phase === "BUILDING" || sq.phase === "EXHAUSTION");
+      !trending &&
+      (sq.phase === "BUILDING" ||
+        (EXHAUSTION_ENABLED && sq.phase === "EXHAUSTION"));
 
     if (isTrendBreak || allowNormal) {
       const phase = isTrendBreak ? "TREND_BREAK" : sq.phase!;

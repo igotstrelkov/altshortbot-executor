@@ -85,6 +85,20 @@ const BB_BASE = "https://api.bybit.com";
 const BN_DATA = "https://fapi.binance.com/futures/data";
 const HL_BASE = "https://api.hyperliquid.xyz";
 
+// Adverse price move (%) at which the executor's stop closes the trade.
+// MUST stay in sync with bybit_executor.ts stopLossPct (0.20 -> 20). The
+// stop-aware outcome scoring uses this so the backtest models the executor's
+// real exit instead of scoring the raw 48h price path.
+const STOP_PCT = 20;
+
+// Mirrors EXHAUSTION_ENABLED in live_scanner.ts. The live bot only writes
+// BUILDING / EXHAUSTION / TREND_BREAK signals to signal_queue.json (FUNDING
+// and PUMP_TOP are informational and never queued), and EXHAUSTION /
+// TREND_BREAK are gated behind this flag. The STOP-AWARE scoreboard scores
+// QUEUED signals only, so its headline P&L equals what the live bot would
+// actually have traded over the window. Keep this in sync with live_scanner.ts.
+const EXHAUSTION_ENABLED = false;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -177,10 +191,15 @@ interface PumpSignal {
 interface Outcome {
   signal: Signal | PumpSignal;
   signalType: "FUNDING" | "PUMP_TOP" | "SQUEEZE";
+  // SQUEEZE only — distinguishes BUILDING from EXHAUSTION/TREND_BREAK so the
+  // queue mirror (isQueued) can score only what the live bot actually trades.
+  signalPhase?: "BUILDING" | "EXHAUSTION" | "TREND_BREAK";
   maxPricePct: number;
   minPricePct: number;
   finalPricePct: number;
   verdict: string;
+  stoppedOut: boolean; // true if maxPricePct >= STOP_PCT (executor stop hit)
+  tradeResultPct: number; // short P&L, price %: stop-out = -STOP_PCT, else -finalPricePct
 }
 
 interface CoinResult {
@@ -1568,6 +1587,7 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
           : finalPct > 3
             ? "SQUEEZED"
             : "NEUTRAL";
+    const stoppedOut = maxPct >= STOP_PCT;
     outcomes.push({
       signal: sig,
       signalType: "FUNDING",
@@ -1575,6 +1595,8 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
       minPricePct: minPct,
       finalPricePct: finalPct,
       verdict,
+      stoppedOut,
+      tradeResultPct: stoppedOut ? -STOP_PCT : -finalPct,
     });
   }
 
@@ -1604,6 +1626,7 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
           : finalPct > 3
             ? "SQUEEZED"
             : "NEUTRAL";
+    const stoppedOut = maxPct >= STOP_PCT;
     pumpOutcomes.push({
       signal: sig,
       signalType: "PUMP_TOP",
@@ -1611,6 +1634,8 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
       minPricePct: minPct,
       finalPricePct: finalPct,
       verdict,
+      stoppedOut,
+      tradeResultPct: stoppedOut ? -STOP_PCT : -finalPct,
     });
   }
 
@@ -1638,13 +1663,17 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
           : finalPct > 3
             ? "SQUEEZED"
             : "NEUTRAL";
+    const stoppedOut = maxPct >= STOP_PCT;
     squeezeOutcomes.push({
       signal: sig as unknown as Signal,
       signalType: "SQUEEZE",
+      signalPhase: sig.signalPhase,
       maxPricePct: maxPct,
       minPricePct: minPct,
       finalPricePct: finalPct,
       verdict,
+      stoppedOut,
+      tradeResultPct: stoppedOut ? -STOP_PCT : -finalPct,
     });
   }
 
@@ -1674,7 +1703,103 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
 // Console report
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Mirrors the live bot's queue gate (live_scanner.ts ~line 1120): true iff
+// this signal would be written to signal_queue.json and traded by the
+// executor. FUNDING / PUMP_TOP never queue. BUILDING always queues (the OI
+// and funding quality gates are bypassed in the live testnet config).
+// EXHAUSTION / TREND_BREAK queue only when EXHAUSTION_ENABLED is true — note
+// the live bot also requires HIGH/MEDIUM confidence there, which is not
+// modelled here because the branch is currently off.
+function isQueued(o: Outcome): boolean {
+  if (o.signalType !== "SQUEEZE") return false;
+  if (o.signalPhase === "BUILDING") return true;
+  return EXHAUSTION_ENABLED; // EXHAUSTION / TREND_BREAK
+}
+
+function stopStats(outs: Outcome[]) {
+  const wins = outs.filter((o) => o.tradeResultPct > 0).length;
+  const stops = outs.filter((o) => o.stoppedOut).length;
+  const total = outs.reduce((sum, o) => sum + o.tradeResultPct, 0);
+  const avg = outs.length ? total / outs.length : 0;
+  const winRate = outs.length ? ((wins / outs.length) * 100).toFixed(0) : "-";
+  return { wins, stops, total, avg, winRate };
+}
+
 function printReport(results: CoinResult[], config: Config): void {
+  // ── Stop-aware scoreboard ──────────────────────────────────────────────────
+  // Models the executor's real exit: a trade whose adverse excursion reaches
+  // STOP_PCT is a stop-out scored at -STOP_PCT; otherwise it is held to the
+  // 48h timeout and scored at -finalPricePct (short P&L in price %). This is
+  // the figure to calibrate against. The verdict win rates printed below are
+  // price-path descriptions and do NOT model the stop.
+  {
+    const everything = results.flatMap((r) => [
+      ...r.outcomes,
+      ...r.pumpOutcomes,
+      ...r.squeezeOutcomes,
+    ]);
+    if (everything.length) {
+      const queued = everything.filter(isQueued);
+      console.log();
+      console.log("═".repeat(62));
+      console.log(
+        `  STOP-AWARE RESULTS — ${STOP_PCT}% stop modelled (executor reality)`,
+      );
+      console.log(
+        `  Headline scores QUEUED signals only — mirrors signal_queue.json`,
+      );
+      console.log(
+        `  (EXHAUSTION_ENABLED=${EXHAUSTION_ENABLED}; FUNDING/PUMP never queue).`,
+      );
+      console.log("═".repeat(62));
+      for (const r of results) {
+        const all = [
+          ...r.outcomes,
+          ...r.pumpOutcomes,
+          ...r.squeezeOutcomes,
+        ].filter(isQueued);
+        if (!all.length) continue;
+        const ss = stopStats(all);
+        console.log(
+          `  ${r.coin.padEnd(8)} ${String(all.length).padStart(2)} sig | win ${ss.winRate.padStart(3)}% | ${String(ss.stops).padStart(2)} stopped | avg ${s(ss.avg)}% | total ${s(ss.total)}%`,
+        );
+      }
+      const tot = stopStats(queued);
+      console.log("─".repeat(62));
+      console.log(
+        `  QUEUED ${queued.length} signal(s) | win ${tot.winRate}% | ${tot.stops} stopped | avg ${s(tot.avg)}%/trade | total ${s(tot.total)}%`,
+      );
+      // Signal types the scanner generates but never queues — printed for
+      // review only and excluded from the headline (the executor never
+      // trades them). Mirrors the live bot, where FUNDING/PUMP_TOP fire as
+      // alerts/logs but never reach signal_queue.json.
+      const infoCandidates: [string, Outcome[]][] = [
+        ["FUNDING", everything.filter((o) => o.signalType === "FUNDING")],
+        ["PUMP_TOP", everything.filter((o) => o.signalType === "PUMP_TOP")],
+        [
+          "EXH/BREAK",
+          everything.filter(
+            (o) => o.signalType === "SQUEEZE" && o.signalPhase !== "BUILDING",
+          ),
+        ],
+      ];
+      const infoGroups = infoCandidates.filter(
+        ([, g]) => g.length > 0 && g.some((o) => !isQueued(o)),
+      );
+      if (infoGroups.length) {
+        console.log(
+          `  ── not queued — informational only, never traded by the bot ──`,
+        );
+        for (const [name, g] of infoGroups) {
+          const gs = stopStats(g);
+          console.log(
+            `  ${name.padEnd(9)} ${String(g.length).padStart(2)} sig | total ${s(gs.total)}% | avg ${s(gs.avg)}%/trade`,
+          );
+        }
+      }
+    }
+  }
+
   for (const result of results) {
     const { coin, outcomes } = result;
     if (!outcomes.length) continue;
@@ -2024,6 +2149,12 @@ function generateChartHTML(results: CoinResult[], config: Config): string {
             endIdx: endIdx === -1 ? displayHours.length - 1 : endIdx,
             colour: vColour(o.verdict),
             verdict: o.verdict,
+            kind:
+              o.signalType === "SQUEEZE"
+                ? (o.signal as unknown as SqueezeSignal).signalPhase
+                : o.signalType === "PUMP_TOP"
+                  ? "PUMP TOP"
+                  : "FUNDING",
             fundingApr: o.signal.fundingApr,
             entryPrice: o.signal.entryPrice,
             finalPct: o.finalPricePct,
@@ -2104,25 +2235,30 @@ function generateChartHTML(results: CoinResult[], config: Config): string {
   const dataJson = JSON.stringify(chartData);
 
   const coinSections = results
-    .map(({ coin, outcomes }) => {
-      const winners = outcomes.filter((o) =>
+    .map(({ coin, outcomes, pumpOutcomes, squeezeOutcomes }) => {
+      // Overview counts every signal type — funding (Gate 1/2), pump-top, and
+      // squeeze (BUILDING / EXHAUSTION / TREND_BREAK) — not just the funding
+      // strategy. Win rate stays verdict-based, consistent with the per-signal
+      // detail cards; the stop-aware figure is in the console scoreboard.
+      const allOutcomes = [...outcomes, ...pumpOutcomes, ...squeezeOutcomes];
+      const winners = allOutcomes.filter((o) =>
         ["DROPPED", "PUMP+DUMP"].includes(o.verdict),
       ).length;
       return `
 <section class="coin-section" id="section-${coin}">
-  <h2>${coin} <span class="tag" id="tag-${coin}">${outcomes.length} signal${outcomes.length !== 1 ? "s" : ""}</span></h2>
+  <h2>${coin} <span class="tag" id="tag-${coin}">${allOutcomes.length} signal${allOutcomes.length !== 1 ? "s" : ""}</span></h2>
   <div class="overview-grid">
-    <div class="stat-card"><div class="stat-v">${outcomes.length}</div><div class="stat-l">Signals fired</div></div>
+    <div class="stat-card"><div class="stat-v">${allOutcomes.length}</div><div class="stat-l">Signals fired</div></div>
     <div class="stat-card green"><div class="stat-v">${winners}</div><div class="stat-l">Winners</div></div>
-    <div class="stat-card red"><div class="stat-v">${outcomes.filter((o) => o.verdict === "SQUEEZED").length}</div><div class="stat-l">Squeezed</div></div>
-    <div class="stat-card"><div class="stat-v">${outcomes.length ? ((winners / outcomes.length) * 100).toFixed(0) + "%" : "—"}</div><div class="stat-l">Win rate</div></div>
-    <div class="stat-card"><div class="stat-v">${outcomes.length ? s(avgArr(outcomes.map((o) => o.finalPricePct))) + "%" : "—"}</div><div class="stat-l">Avg ${config.lookaheadHours}h</div></div>
+    <div class="stat-card red"><div class="stat-v">${allOutcomes.filter((o) => o.verdict === "SQUEEZED").length}</div><div class="stat-l">Squeezed</div></div>
+    <div class="stat-card"><div class="stat-v">${allOutcomes.length ? ((winners / allOutcomes.length) * 100).toFixed(0) + "%" : "—"}</div><div class="stat-l">Win rate</div></div>
+    <div class="stat-card"><div class="stat-v">${allOutcomes.length ? s(avgArr(allOutcomes.map((o) => o.finalPricePct))) + "%" : "—"}</div><div class="stat-l">Avg ${config.lookaheadHours}h</div></div>
     <div class="stat-card"><div class="stat-v">${config.fundingAprThreshold}%</div><div class="stat-l">Gate 1 APR</div></div>
   </div>
   ${
-    outcomes.length === 0
+    allOutcomes.length === 0
       ? `<div class="no-signal-banner">
-    <strong>No signals fired</strong> — funding APR stayed below ${config.fundingAprThreshold}% for the entire ${config.days}-day window.
+    <strong>No signals fired</strong> — no funding, squeeze, or pump-top signal triggered in the ${config.days}-day window.
     The charts below show price, funding APR, and OI so you can see how close it got.
     Try lowering <code>--threshold</code> or picking a coin with more activity.
   </div>`
@@ -2239,7 +2375,7 @@ function sigAnnotations(signals, displayLen, lookahead) {
     ann['sl'+i] = { type:'line', xMin:sig.idx, xMax:sig.idx, borderColor:sig.colour, borderWidth:2, borderDash:[5,3] };
     ann['sb'+i] = { type:'box', xMin:sig.idx, xMax:sig.endIdx, backgroundColor:sig.colour+'18', borderWidth:0 };
     ann['lbl'+i] = { type:'label', xValue:sig.idx, yValue:'center',
-      content:['🔴 SIGNAL', sig.verdict, (sig.fundingApr ?? 0).toFixed(1)+'% APR'],
+      content:['🔴 '+sig.kind, sig.verdict, (sig.fundingApr ?? 0).toFixed(1)+'% APR'],
       backgroundColor:sig.colour+'33', borderColor:sig.colour, borderWidth:1, borderRadius:4,
       font:{size:10}, color:'#f1f5f9', padding:5, position:{x:'center',y:'start'} };
   });
