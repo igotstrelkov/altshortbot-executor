@@ -45,9 +45,9 @@ const PAPER_ACCOUNT = parseFloat(process.env.BYBIT_PAPER_ACCOUNT ?? "10000");
 
 const RISK = {
   maxLeverage: 3,
-  riskPerTrade: 0.02, // 2% account risk per trade
-  stopLossPct: 0.12, // 12% stop loss
-  maxPositions: 3, // max concurrent open positions
+  riskPerTrade: 0.04, // 2% account risk per trade
+  stopLossPct: 0.2, // 12% stop loss
+  maxPositions: 5, // max concurrent open positions
   timeoutH: 48, // close after 48h regardless
 } as const;
 
@@ -60,7 +60,7 @@ const client = new RestClientV5({
   key: BYBIT_API_KEY,
   secret: BYBIT_API_SECRET,
   testnet: false,
-  demoTrading: true,
+  demoTrading: true, // new flag
 });
 
 // ─── Telegram ─────────────────────────────────────────────────────────────────
@@ -569,11 +569,9 @@ async function main(): Promise<void> {
   }
 
   console.log(`\n${queue.length} signal(s) in queue...`);
-  clearQueue();
 
-  // Check position cap
-  const openCount = Object.keys(store.open).length;
-  if (openCount >= RISK.maxPositions) {
+  // Check position cap before clearing queue
+  if (Object.keys(store.open).length >= RISK.maxPositions) {
     console.log(
       `  At max positions (${RISK.maxPositions}) — signals deferred to next run`,
     );
@@ -581,19 +579,22 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Get account equity
+  // Get account equity before clearing queue — if this fails, signals are preserved
   let equity = store.paperEquityUsdt;
   if (!IS_PAPER) {
     const liveEquity = await fetchAccountEquity();
     if (liveEquity === null) {
       console.log(
-        "  Could not fetch account equity — signals deferred to next run",
+        "  Could not fetch account equity — signals preserved for next run",
       );
       savePositions(store);
       return;
     }
     equity = liveEquity;
   }
+
+  // Safe to clear now — equity confirmed, execution proceeding
+  clearQueue();
 
   let executed = 0;
   for (const sig of queue) {

@@ -897,7 +897,28 @@ function gate2Passes(
 
 async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
   const symbol = `${coin}USDT`;
-  const nowMs = Date.now();
+  // When using fixtures, freeze the time window at capture time so tests
+  // produce identical results regardless of when they're run. Without this,
+  // the rolling startMs shifts forward daily and older signals fall out of range.
+  let nowMs = Date.now();
+  const _fixturePath =
+    (config.useFixtures ?? config.saveFixtures)
+      ? `${config.useFixtures ?? config.saveFixtures}/${coin}.json`
+      : null;
+  if (config.useFixtures && _fixturePath) {
+    try {
+      const {
+        existsSync: _fsExists,
+        readFileSync: _readFileSync,
+      } = require("fs");
+      if (_fsExists(_fixturePath)) {
+        const _fx = JSON.parse(_readFileSync(_fixturePath, "utf8"));
+        if (_fx.capturedAt) nowMs = new Date(_fx.capturedAt).getTime();
+      }
+    } catch {
+      /* fall back to Date.now() */
+    }
+  }
   const startMs = nowMs - config.days * 24 * 3600_000;
   // Binance openInterestHist only retains the latest 30 days regardless of period requested
   // Cap the fetch window accordingly
