@@ -45,9 +45,9 @@ const PAPER_ACCOUNT = parseFloat(process.env.BYBIT_PAPER_ACCOUNT ?? "10000");
 
 const RISK = {
   maxLeverage: 3,
-  riskPerTrade: 0.04, // 2% account risk per trade
-  stopLossPct: 0.2, // 12% stop loss
-  maxPositions: 5, // max concurrent open positions
+  riskPerTrade: 0.03, // 3% account risk per trade
+  stopLossPct: 0.2, // 20% stop loss
+  maxPositions: 10, // max concurrent open positions
   timeoutH: 48, // close after 48h regardless
 } as const;
 
@@ -443,7 +443,7 @@ async function executeSignal(
 
   const leverage = Math.min(RISK.maxLeverage, instr.maxLev);
   const riskUsdt = equity * RISK.riskPerTrade;
-  const notional = riskUsdt / RISK.stopLossPct; // e.g. $200 / 0.12 = $1,667
+  const notional = riskUsdt / RISK.stopLossPct;
   const stopPx = entry * (1 + RISK.stopLossPct);
 
   // Set leverage before entry

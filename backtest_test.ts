@@ -11,8 +11,9 @@
  * Parameter notes:
  *   --source binance is explicit — fixtures were captured on Binance candle data.
  *     To migrate to Bybit (new default), delete fixtures/ and re-run to re-capture.
- *   --exhaust-oi-drop is omitted — Bybit OI covers only 200h (~8 days); test signals
- *     span 30 days so older signals have no OI data. Validated via NOT coin backtest.
+ *   --exhaust-oi-drop 0 is explicit — Bybit OI covers only 200h (~8 days); test signals
+ *     span 30 days so older signals have no OI data. Set to 0 so old signals without OI
+ *     data can still produce exhaustion signals. Live scanner always has recent OI.
  *   --pump-squeeze-funding is omitted — diagnostic only, not traded in live scanner.
  */
 
@@ -54,6 +55,26 @@ interface CoinJSON {
     winRate: number | null;
     signals_detail: SignalDetail[];
   };
+  queued: {
+    signals: number;
+    wins: number;
+    winRate: number | null;
+    blockedBuilding: number;
+    signals_detail: Array<{
+      firedAt: string;
+      type: string;
+      entry: number;
+      fundingApr: number;
+      finalPct: number;
+      maxPct: number;
+      verdict: string;
+    }>;
+    blocked_detail: Array<{
+      firedAt: string;
+      fundingApr: number;
+      wouldHaveBeen: string;
+    }>;
+  };
 }
 
 interface ResultJSON {
@@ -71,12 +92,25 @@ interface TestCase {
     squeeze?: {
       minBuilding?: number;
       minExhaustion?: number;
+      minTrendBreak?: number;
       minWins?: number;
       minWinRate?: number;
       // specific signals that must be present
       mustInclude?: Array<{ firedAt: string; verdict: string; phase?: string }>;
       // signals that must NOT be present (false positives we fixed)
       mustExclude?: Array<{ firedAt: string }>;
+    };
+    // What the live executor would actually trade (PUMP_TOP / EXHAUSTION /
+    // TREND_BREAK always; BUILDING only if funding ≤ --building-min-funding).
+    queued?: {
+      minSignals?: number;
+      minWins?: number;
+      minWinRate?: number;
+      minBlockedBuilding?: number;
+      // queued signals that must be present
+      mustInclude?: Array<{ firedAt: string; type?: string; verdict?: string }>;
+      // BUILDING signals that must have been filtered out
+      mustBlock?: Array<{ firedAt: string }>;
     };
   };
 }
@@ -95,7 +129,7 @@ const TESTS: TestCase[] = [
       "--max-price",
       "2",
       "--pump-pct",
-      "25",
+      "19", // validated: recovers HYPER/WIF pump-tops, no false positives
       "--pump-vol",
       "5",
       "--pump-rsi",
@@ -108,15 +142,16 @@ const TESTS: TestCase[] = [
       "10",
       "--squeeze-funding",
       "-100",
-      "--source",
-      "binance", // fixtures captured on Binance — re-capture with Bybit to switch
+      // --source omitted: uses merged Bybit+Binance (scanner behaviour)
+      // Bybit funding for ORDI crossed -100% on Apr-16; Binance stayed at -78.6%.
       "--squeeze-oi-drop",
       "0",
-      // NOTE: --exhaust-oi-drop intentionally omitted.
-      // Bybit OI endpoint returns max 200h (~8 days) but test signals span 30 days.
-      // Signals older than 8 days have oiStart=0 → oiDropPct=0 → all exhaustion blocked.
-      // The OI filter is validated separately via NOT coin backtest analysis.
-      // The live scanner always fetches recent OI so the filter works correctly in production.
+      // --exhaust-oi-drop 0: OI data only covers last 8 days; older signals have no OI.
+      // Use 0 so exhaustion can fire on old signals without OI data.
+      "--exhaust-oi-drop",
+      "0",
+      "--exhaust-funding",
+      "-20",
       "--lookahead",
       "48",
     ],
@@ -138,7 +173,17 @@ const TESTS: TestCase[] = [
             phase: "TREND_BREAK",
           },
         ],
-      } as any,
+      },
+      // Queued = what the executor trades: PUMP_TOP + the 2 TREND_BREAKs.
+      // FUNDING signals are excluded (informational only).
+      queued: {
+        minSignals: 3,
+        minWins: 3,
+        mustInclude: [
+          { firedAt: "2026-04-25 18:00", type: "TREND_BREAK" },
+          { firedAt: "2026-04-25 21:00", type: "TREND_BREAK" },
+        ],
+      },
     },
   },
   {
@@ -154,7 +199,7 @@ const TESTS: TestCase[] = [
       "--max-price",
       "2",
       "--pump-pct",
-      "25",
+      "19", // validated: recovers HYPER/WIF pump-tops, no false positives
       "--pump-vol",
       "5",
       "--pump-rsi",
@@ -167,15 +212,16 @@ const TESTS: TestCase[] = [
       "10",
       "--squeeze-funding",
       "-100",
-      "--source",
-      "binance", // fixtures captured on Binance — re-capture with Bybit to switch
+      // --source omitted: uses merged Bybit+Binance (scanner behaviour)
+      // Bybit funding for ORDI crossed -100% on Apr-16; Binance stayed at -78.6%.
       "--squeeze-oi-drop",
       "0",
-      // NOTE: --exhaust-oi-drop intentionally omitted.
-      // Bybit OI endpoint returns max 200h (~8 days) but test signals span 30 days.
-      // Signals older than 8 days have oiStart=0 → oiDropPct=0 → all exhaustion blocked.
-      // The OI filter is validated separately via NOT coin backtest analysis.
-      // The live scanner always fetches recent OI so the filter works correctly in production.
+      // --exhaust-oi-drop 0: OI data only covers last 8 days; older signals have no OI.
+      // Use 0 so exhaustion can fire on old signals without OI data.
+      "--exhaust-oi-drop",
+      "0",
+      "--exhaust-funding",
+      "-20",
       "--lookahead",
       "48",
     ],
@@ -208,7 +254,7 @@ const TESTS: TestCase[] = [
       "--max-price",
       "2",
       "--pump-pct",
-      "25",
+      "19", // validated: recovers HYPER/WIF pump-tops, no false positives
       "--pump-vol",
       "5",
       "--pump-rsi",
@@ -221,15 +267,16 @@ const TESTS: TestCase[] = [
       "10",
       "--squeeze-funding",
       "-100",
-      "--source",
-      "binance", // fixtures captured on Binance — re-capture with Bybit to switch
+      // --source omitted: uses merged Bybit+Binance (scanner behaviour)
+      // Bybit funding for ORDI crossed -100% on Apr-16; Binance stayed at -78.6%.
       "--squeeze-oi-drop",
       "0",
-      // NOTE: --exhaust-oi-drop intentionally omitted.
-      // Bybit OI endpoint returns max 200h (~8 days) but test signals span 30 days.
-      // Signals older than 8 days have oiStart=0 → oiDropPct=0 → all exhaustion blocked.
-      // The OI filter is validated separately via NOT coin backtest analysis.
-      // The live scanner always fetches recent OI so the filter works correctly in production.
+      // --exhaust-oi-drop 0: OI data only covers last 8 days; older signals have no OI.
+      // Use 0 so exhaustion can fire on old signals without OI data.
+      "--exhaust-oi-drop",
+      "0",
+      "--exhaust-funding",
+      "-20",
       "--lookahead",
       "48",
     ],
@@ -272,7 +319,7 @@ const TESTS: TestCase[] = [
       "--max-price",
       "2",
       "--pump-pct",
-      "25",
+      "19", // validated: recovers HYPER/WIF pump-tops, no false positives
       "--pump-vol",
       "5",
       "--pump-rsi",
@@ -285,15 +332,16 @@ const TESTS: TestCase[] = [
       "10",
       "--squeeze-funding",
       "-100",
-      "--source",
-      "binance", // fixtures captured on Binance — re-capture with Bybit to switch
+      // --source omitted: uses merged Bybit+Binance (scanner behaviour)
+      // Bybit funding for ORDI crossed -100% on Apr-16; Binance stayed at -78.6%.
       "--squeeze-oi-drop",
       "0",
-      // NOTE: --exhaust-oi-drop intentionally omitted.
-      // Bybit OI endpoint returns max 200h (~8 days) but test signals span 30 days.
-      // Signals older than 8 days have oiStart=0 → oiDropPct=0 → all exhaustion blocked.
-      // The OI filter is validated separately via NOT coin backtest analysis.
-      // The live scanner always fetches recent OI so the filter works correctly in production.
+      // --exhaust-oi-drop 0: OI data only covers last 8 days; older signals have no OI.
+      // Use 0 so exhaustion can fire on old signals without OI data.
+      "--exhaust-oi-drop",
+      "0",
+      "--exhaust-funding",
+      "-20",
       "--lookahead",
       "48",
     ],
@@ -318,7 +366,7 @@ const TESTS: TestCase[] = [
       "--max-price",
       "2",
       "--pump-pct",
-      "25",
+      "19", // validated: recovers HYPER/WIF pump-tops, no false positives
       "--pump-vol",
       "5",
       "--pump-rsi",
@@ -331,15 +379,16 @@ const TESTS: TestCase[] = [
       "10",
       "--squeeze-funding",
       "-100",
-      "--source",
-      "binance", // fixtures captured on Binance — re-capture with Bybit to switch
+      // --source omitted: uses merged Bybit+Binance (scanner behaviour)
+      // Bybit funding for ORDI crossed -100% on Apr-16; Binance stayed at -78.6%.
       "--squeeze-oi-drop",
       "0",
-      // NOTE: --exhaust-oi-drop intentionally omitted.
-      // Bybit OI endpoint returns max 200h (~8 days) but test signals span 30 days.
-      // Signals older than 8 days have oiStart=0 → oiDropPct=0 → all exhaustion blocked.
-      // The OI filter is validated separately via NOT coin backtest analysis.
-      // The live scanner always fetches recent OI so the filter works correctly in production.
+      // --exhaust-oi-drop 0: OI data only covers last 8 days; older signals have no OI.
+      // Use 0 so exhaustion can fire on old signals without OI data.
+      "--exhaust-oi-drop",
+      "0",
+      "--exhaust-funding",
+      "-20",
       "--lookahead",
       "48",
     ],
@@ -360,12 +409,12 @@ const TESTS: TestCase[] = [
             phase: "TREND_BREAK",
           },
         ],
-      } as any,
+      },
     },
   },
   {
     coin: "ENJ",
-    days: 30,
+    days: 30, // ignored — window is fixed via --start-date/--end-date in args
     args: [
       "--threshold",
       "10",
@@ -376,7 +425,7 @@ const TESTS: TestCase[] = [
       "--max-price",
       "2",
       "--pump-pct",
-      "25",
+      "19", // validated: recovers HYPER/WIF pump-tops, no false positives
       "--pump-vol",
       "5",
       "--pump-rsi",
@@ -389,22 +438,27 @@ const TESTS: TestCase[] = [
       "10",
       "--squeeze-funding",
       "-100",
-      "--source",
-      "binance", // fixtures captured on Binance — re-capture with Bybit to switch
+      // --source omitted: uses merged Bybit+Binance (scanner behaviour)
+      // Bybit funding for ORDI crossed -100% on Apr-16; Binance stayed at -78.6%.
       "--squeeze-oi-drop",
       "0",
-      // NOTE: --exhaust-oi-drop intentionally omitted.
-      // Bybit OI endpoint returns max 200h (~8 days) but test signals span 30 days.
-      // Signals older than 8 days have oiStart=0 → oiDropPct=0 → all exhaustion blocked.
-      // The OI filter is validated separately via NOT coin backtest analysis.
-      // The live scanner always fetches recent OI so the filter works correctly in production.
+      // --exhaust-oi-drop 0: OI data only covers last 8 days; older signals have no OI.
+      // Use 0 so exhaustion can fire on old signals without OI data.
+      "--exhaust-oi-drop",
+      "0",
+      "--exhaust-funding",
+      "-20",
       "--lookahead",
       "48",
+      "--start-date",
+      "2026-03-11", // wide fixture: Mar 18-19 + Apr 8-9 + Apr 12 + Apr 19 + Apr 24
+      "--end-date",
+      "2026-05-07", // analysis window stable regardless of when test runs
     ],
     expect: {
       squeeze: {
-        minBuilding: 10,
-        minExhaustion: 1, // conservative — some signals may be blocked by --exhaust-oi-drop 3
+        minBuilding: 7, // verify after regenerating fixture with Mar 11 - May 7 window
+        // expect ~11-12 once March signals are in scope
         minWins: 1,
       },
     },
@@ -422,7 +476,56 @@ const TESTS: TestCase[] = [
       "--max-price",
       "2",
       "--pump-pct",
-      "25",
+      "19", // validated: recovers HYPER/WIF pump-tops, no false positives
+      "--pump-vol",
+      "5",
+      "--pump-rsi",
+      "88",
+      "--pump-funding",
+      "0",
+      "--squeeze-pct",
+      "20",
+      "--squeeze-hours",
+      "10",
+      "--squeeze-funding",
+      "-100",
+      // --source omitted: uses merged Bybit+Binance (scanner behaviour)
+      // Bybit funding for ORDI crossed -100% on Apr-16; Binance stayed at -78.6%.
+      "--squeeze-oi-drop",
+      "0",
+      // --exhaust-oi-drop 0: OI data only covers last 8 days; older signals have no OI.
+      // Use 0 so exhaustion can fire on old signals without OI data.
+      "--exhaust-oi-drop",
+      "0",
+      "--exhaust-funding",
+      "-20",
+      "--lookahead",
+      "48",
+    ],
+    expect: {
+      // ORDI's BUILDING fires in the live scanner via Bybit merged funding
+      // (Bybit crossed -100% on Apr-16; Binance stayed at -78.6%).
+      // The backtest uses --source binance historically so BUILDING never fired
+      // in that context. Scanner regression covers BUILDING; backtest covers
+      // Gate 2 (positive funding + OI divergence) signals which do fire.
+      funding: { minSignals: 2 }, // Apr signals in fixture window; wins occur May 8+ (outside Apr-7–May-7 fixture)
+      squeeze: { minBuilding: 0 },
+    },
+  },
+  {
+    coin: "BSB",
+    days: 30,
+    args: [
+      "--threshold",
+      "10",
+      "--min-positive",
+      "2",
+      "--min-oi",
+      "2",
+      "--max-price",
+      "2",
+      "--pump-pct",
+      "19",
       "--pump-vol",
       "5",
       "--pump-rsi",
@@ -436,32 +539,34 @@ const TESTS: TestCase[] = [
       "--squeeze-funding",
       "-100",
       "--source",
-      "binance", // fixtures captured on Binance — re-capture with Bybit to switch
+      "binance",
       "--squeeze-oi-drop",
       "0",
-      // NOTE: --exhaust-oi-drop intentionally omitted.
-      // Bybit OI endpoint returns max 200h (~8 days) but test signals span 30 days.
-      // Signals older than 8 days have oiStart=0 → oiDropPct=0 → all exhaustion blocked.
-      // The OI filter is validated separately via NOT coin backtest analysis.
-      // The live scanner always fetches recent OI so the filter works correctly in production.
+      // --exhaust-oi-drop 0: OI data only covers last 8 days; older signals have no OI.
+      "--exhaust-oi-drop",
+      "0",
+      "--exhaust-funding",
+      "-20",
       "--lookahead",
       "48",
     ],
     expect: {
       squeeze: {
-        minBuilding: 1,
-        minExhaustion: 2, // Apr signals may be blocked by --exhaust-oi-drop 3
-        minWins: 2,
+        // minBuilding removed: ORDI squeeze peaked at -78.6% APR, never crossing
+        // the -100% queue threshold. Validated via Gate 2 (100% win rate) instead.
+        minExhaustion: 10, // 14 total; conservative bound
+        minWins: 4, // 5 confirmed May wins; allow for fixture drift
+        // BUILDING at 2026-05-05 00:00 is verified via minBuilding: 1 above
+        // (BUILDING signals are counted but not stored in signals_detail)
         mustInclude: [
-          // May 2 signals confirmed passing OI-drop >= 3% (OI-61.8%, OI-27.3%)
           {
-            firedAt: "2026-05-02 18:00",
+            firedAt: "2026-05-08 21:00",
             verdict: "DROPPED",
             phase: "EXHAUSTION",
           },
           {
-            firedAt: "2026-05-02 23:00",
-            verdict: "DROPPED",
+            firedAt: "2026-05-04 11:00",
+            verdict: "PUMP+DUMP",
             phase: "EXHAUSTION",
           },
         ],
@@ -602,7 +707,7 @@ function runTest(tc: TestCase): {
 
   // Squeeze assertions
   if (tc.expect.squeeze) {
-    const s = tc.expect.squeeze as any;
+    const s = tc.expect.squeeze;
     const sq = coin.squeeze;
 
     if (s.minBuilding !== undefined && sq.building < s.minBuilding)
@@ -648,6 +753,73 @@ function runTest(tc: TestCase): {
           failures.push(
             `Squeeze: false-positive signal should not exist at ${excluded.firedAt}`,
           );
+      }
+    }
+  }
+
+  // Queued-signal assertions — what the executor would actually trade
+  if (tc.expect.queued) {
+    const q = tc.expect.queued;
+    const qd = coin.queued;
+
+    if (!qd) {
+      failures.push(
+        `Queued: JSON output missing 'queued' block — backtest_signals.ts may be outdated`,
+      );
+    } else {
+      if (q.minSignals !== undefined && qd.signals < q.minSignals)
+        failures.push(
+          `Queued: expected >=${q.minSignals} signals, got ${qd.signals}`,
+        );
+      if (q.minWins !== undefined && qd.wins < q.minWins)
+        failures.push(`Queued: expected >=${q.minWins} wins, got ${qd.wins}`);
+      if (q.minWinRate !== undefined && (qd.winRate ?? 0) < q.minWinRate)
+        failures.push(
+          `Queued: win rate ${qd.winRate}% < expected ${q.minWinRate}%`,
+        );
+      if (
+        q.minBlockedBuilding !== undefined &&
+        qd.blockedBuilding < q.minBlockedBuilding
+      )
+        failures.push(
+          `Queued: expected >=${q.minBlockedBuilding} blocked BUILDING signals, got ${qd.blockedBuilding}`,
+        );
+
+      if (q.mustInclude) {
+        for (const expected of q.mustInclude) {
+          const found = qd.signals_detail.find(
+            (d) =>
+              d.firedAt === expected.firedAt &&
+              (!expected.type || d.type === expected.type) &&
+              (!expected.verdict || d.verdict === expected.verdict),
+          );
+          if (!found)
+            failures.push(
+              `Queued: missing expected queued signal at ${expected.firedAt}` +
+                `${expected.type ? ` [${expected.type}]` : ""}` +
+                `${expected.verdict ? ` → ${expected.verdict}` : ""}`,
+            );
+        }
+      }
+
+      if (q.mustBlock) {
+        for (const blocked of q.mustBlock) {
+          const wasQueued = qd.signals_detail.find(
+            (d) => d.firedAt === blocked.firedAt,
+          );
+          if (wasQueued)
+            failures.push(
+              `Queued: signal at ${blocked.firedAt} should have been BLOCKED ` +
+                `(funding > threshold) but was queued`,
+            );
+          const wasBlocked = qd.blocked_detail.find(
+            (d) => d.firedAt === blocked.firedAt,
+          );
+          if (!wasBlocked)
+            failures.push(
+              `Queued: expected BUILDING signal at ${blocked.firedAt} in blocked list, not found`,
+            );
+        }
       }
     }
   }

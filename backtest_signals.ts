@@ -108,6 +108,7 @@ interface Config {
   exhaustMaxFundingApr: number; // funding must be ABOVE this to count as exhaustion (default -20%)
   exhaustMinOiDrop: number; // OI must have dropped this % for exhaustion to fire (0 = disabled)
   squeezeMinOiDrop: number;
+  buildingMinFundingApr: number; // BUILDING queued only if funding ≤ this (Strategy B filter, default -200%)
   trendFilter: boolean;
   trendDays7Pct: number;
   trendDays14Pct: number;
@@ -172,11 +173,23 @@ interface PumpSignal {
   volumeMultiple: number;
   rsi: number;
   fundingApr: number;
+  trendingAtFire: boolean; // coin in parabolic uptrend (+30%/7d AND +50%/14d) when pump fired
+}
+
+interface PostPumpSignal {
+  coin: string;
+  firedAtMs: number;
+  firedAtStr: string;
+  entryPrice: number;
+  fundingApr: number;
+  oiDropPct: number;
+  hoursSincePump: number;
+  pumpFiredAtStr: string;
 }
 
 interface Outcome {
-  signal: Signal | PumpSignal;
-  signalType: "FUNDING" | "PUMP_TOP" | "SQUEEZE";
+  signal: Signal | PumpSignal | PostPumpSignal;
+  signalType: "FUNDING" | "PUMP_TOP" | "SQUEEZE" | "POST_PUMP_REVERSAL";
   maxPricePct: number;
   minPricePct: number;
   finalPricePct: number;
@@ -188,6 +201,7 @@ interface CoinResult {
   outcomes: Outcome[]; // funding strategy signals
   pumpOutcomes: Outcome[]; // pump-top strategy signals
   squeezeOutcomes: Outcome[]; // short squeeze signals
+  postPumpOutcomes: Outcome[]; // post-pump OI collapse signals
   allHours: number[];
   priceByHour: Record<number, number>;
   fundingAprByHour: Record<number, number>;
@@ -897,6 +911,7 @@ function gate2Passes(
 
 async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
   const symbol = `${coin}USDT`;
+
   // When using fixtures, freeze the time window at capture time so tests
   // produce identical results regardless of when they're run. Without this,
   // the rolling startMs shifts forward daily and older signals fall out of range.
@@ -919,6 +934,7 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
       /* fall back to Date.now() */
     }
   }
+
   const startMs = nowMs - config.days * 24 * 3600_000;
   // Binance openInterestHist only retains the latest 30 days regardless of period requested
   // Cap the fetch window accordingly
@@ -1194,8 +1210,10 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
     pSeries: number[] = [];
   const signals: Signal[] = [];
   const pumpSignals: PumpSignal[] = [];
+  const postPumpSignals: PostPumpSignal[] = [];
   const sigSet = new Set<string>();
   const pumpSigSet = new Set<string>();
+  const postPumpSigSet = new Set<string>();
   const COOL = 4 * 3600_000;
   const allHours = Object.keys(priceByHour)
     .map(Number)
@@ -1206,6 +1224,11 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
     maxPumpVolMult = 0,
     maxPumpRsi = 0,
     maxPumpFunding = 0;
+  let lastPumpTopMs: number | null = null;
+  let postPumpOiPeak = 0;
+  let postPumpAlerted = false;
+  const POST_PUMP_LOOKBACK_H = 12;
+  const POST_PUMP_OI_DROP_PCT = 15;
   const squeezeSignals: SqueezeSignal[] = [];
   const squeezeSigSet = new Set<string>();
   let lastSqueezePhase: "BUILDING" | "EXHAUSTION" | "TREND_BREAK" | null = null;
@@ -1276,7 +1299,48 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
             volumeMultiple: Math.round(pump.volumeMultiple * 10) / 10,
             rsi: Math.round(pump.rsi),
             fundingApr: Math.round(pump.fundingApr * 10) / 10,
+            trendingAtFire: isTrendingFull(ts, priceByHour, config),
           });
+        }
+        // Reset post-pump tracking for new pump wave
+        lastPumpTopMs = ts;
+        postPumpOiPeak =
+          oiSeries.length > 0 ? oiSeries[oiSeries.length - 1] : 0;
+        postPumpAlerted = false;
+      }
+
+      // ── Post-pump OI collapse (POST_PUMP_REVERSAL) ────────────────────────
+      if (lastPumpTopMs !== null && !postPumpAlerted) {
+        const hoursSincePump = (ts - lastPumpTopMs) / 3_600_000;
+        if (hoursSincePump > 0 && hoursSincePump <= POST_PUMP_LOOKBACK_H) {
+          const currentOI =
+            oiSeries.length > 0 ? oiSeries[oiSeries.length - 1] : 0;
+          if (currentOI > postPumpOiPeak) postPumpOiPeak = currentOI;
+          const oiDropPct =
+            postPumpOiPeak > 0
+              ? ((currentOI - postPumpOiPeak) / postPumpOiPeak) * 100
+              : 0;
+          if (oiDropPct <= -POST_PUMP_OI_DROP_PCT) {
+            const ppKey = `ppr:${coin}:${Math.floor(ts / COOL)}`;
+            if (!postPumpSigSet.has(ppKey)) {
+              postPumpSigSet.add(ppKey);
+              postPumpSignals.push({
+                coin,
+                firedAtMs: ts,
+                firedAtStr: fmtDate(ts),
+                entryPrice: price,
+                fundingApr: Math.round(fRate * 8760 * 100 * 10) / 10,
+                oiDropPct: Math.round(oiDropPct * 10) / 10,
+                hoursSincePump: Math.round(hoursSincePump * 10) / 10,
+                pumpFiredAtStr: fmtDate(lastPumpTopMs),
+              });
+            }
+            postPumpAlerted = true;
+          }
+        } else if (hoursSincePump > POST_PUMP_LOOKBACK_H) {
+          lastPumpTopMs = null;
+          postPumpOiPeak = 0;
+          postPumpAlerted = false;
         }
       }
     }
@@ -1614,6 +1678,41 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
     });
   }
 
+  // Post-pump reversal outcomes
+  const postPumpOutcomes: Outcome[] = [];
+  for (const sig of postPumpSignals) {
+    const fwdEnd = sig.firedAtMs + config.lookaheadHours * 3600_000;
+    let maxP = sig.entryPrice,
+      minP = sig.entryPrice,
+      finalP = sig.entryPrice;
+    for (const ts of allHours.filter((t) => t > sig.firedAtMs && t <= fwdEnd)) {
+      const p = priceByHour[ts];
+      if (!p) continue;
+      if (p > maxP) maxP = p;
+      if (p < minP) minP = p;
+      finalP = p;
+    }
+    const maxPct = ((maxP - sig.entryPrice) / sig.entryPrice) * 100;
+    const minPct = ((minP - sig.entryPrice) / sig.entryPrice) * 100;
+    const finalPct = ((finalP - sig.entryPrice) / sig.entryPrice) * 100;
+    const verdict =
+      maxPct > 2 && finalPct < -3
+        ? "PUMP+DUMP"
+        : finalPct < -3
+          ? "DROPPED"
+          : finalPct > 3
+            ? "SQUEEZED"
+            : "NEUTRAL";
+    postPumpOutcomes.push({
+      signal: sig,
+      signalType: "POST_PUMP_REVERSAL",
+      maxPricePct: maxPct,
+      minPricePct: minPct,
+      finalPricePct: finalPct,
+      verdict,
+    });
+  }
+
   const squeezeOutcomes: Outcome[] = [];
   for (const sig of squeezeSignals) {
     const fwdEnd = sig.firedAtMs + config.lookaheadHours * 3600_000;
@@ -1660,6 +1759,7 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
     outcomes,
     pumpOutcomes,
     squeezeOutcomes,
+    postPumpOutcomes,
     allHours,
     priceByHour,
     fundingAprByHour,
@@ -1773,7 +1873,53 @@ ${"─".repeat(62)}`);
             ? "❌"
             : "😐";
         console.log(
-          `  ${icon} ${sig.firedAtStr}  entry=$${(sig.entryPrice ?? 0).toFixed(4)}  pump+${sig.candlePumpPct.toFixed(1)}%  vol×${sig.volumeMultiple.toFixed(0)}  RSI:${sig.rsi}  funding:${(sig.fundingApr ?? 0).toFixed(1)}%APR`,
+          `  ${icon} ${sig.firedAtStr}  entry=$${(sig.entryPrice ?? 0).toFixed(4)}  pump+${sig.candlePumpPct.toFixed(1)}%  vol×${sig.volumeMultiple.toFixed(0)}  RSI:${sig.rsi}  funding:${(sig.fundingApr ?? 0).toFixed(1)}%APR${sig.trendingAtFire ? "  ⚠️ PARABOLIC TREND" : ""}`,
+        );
+        console.log(
+          `      max:${s(o.maxPricePct)}%  min:${s(o.minPricePct)}%  final:${s(o.finalPricePct)}%  → ${o.verdict}`,
+        );
+      }
+    }
+  }
+
+  // ── Post-pump reversal results ─────────────────────────────────────────────
+  const allPostPumpOutcomes = results.flatMap((r) => r.postPumpOutcomes);
+  if (allPostPumpOutcomes.length) {
+    for (const result of results) {
+      const { coin, postPumpOutcomes } = result;
+      if (!postPumpOutcomes.length) continue;
+      const dropped = postPumpOutcomes.filter(
+        (o) => o.verdict === "DROPPED",
+      ).length;
+      const pumpDump = postPumpOutcomes.filter(
+        (o) => o.verdict === "PUMP+DUMP",
+      ).length;
+      const squeezed = postPumpOutcomes.filter(
+        (o) => o.verdict === "SQUEEZED",
+      ).length;
+      const winRate = (
+        ((dropped + pumpDump) / postPumpOutcomes.length) *
+        100
+      ).toFixed(0);
+      console.log(`\n${"─".repeat(62)}`);
+      console.log(
+        `  ${coin} — POST-PUMP REVERSAL signals | ${postPumpOutcomes.length} fired`,
+      );
+      console.log(`${"─".repeat(62)}`);
+      console.log(`  Win rate:   ${winRate}%  (dropped + pump+dump)`);
+      console.log(
+        `  Dropped:    ${dropped}  Pump+dump: ${pumpDump}  Squeezed: ${squeezed}  Neutral: ${postPumpOutcomes.length - dropped - pumpDump - squeezed}`,
+      );
+      console.log();
+      for (const o of postPumpOutcomes) {
+        const sig = o.signal as PostPumpSignal;
+        const icon = ["DROPPED", "PUMP+DUMP"].includes(o.verdict)
+          ? "✅"
+          : o.verdict === "SQUEEZED"
+            ? "❌"
+            : "😐";
+        console.log(
+          `  ${icon} ${sig.firedAtStr}  entry=$${sig.entryPrice.toFixed(6)}  OI:${sig.oiDropPct.toFixed(1)}%  ${sig.hoursSincePump.toFixed(1)}h after pump (${sig.pumpFiredAtStr})`,
         );
         console.log(
           `      max:${s(o.maxPricePct)}%  min:${s(o.minPricePct)}%  final:${s(o.finalPricePct)}%  → ${o.verdict}`,
@@ -1974,7 +2120,213 @@ ${"─".repeat(62)}`);
       );
     }
   }
+
+  printQueuedSummary(results, config);
 } // end printReport
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Queued-signal summary — what the live executor would ACTUALLY trade
+// ─────────────────────────────────────────────────────────────────────────────
+// The sections above list every signal the detector found. But the live
+// executor only acts on a subset:
+//   • PUMP_TOP      — always queued
+//   • TREND_BREAK   — always queued (always HIGH confidence)
+//   • EXHAUSTION    — queueing SUSPENDED (negative realized P&L — under review;
+//                     see EXHAUSTION_QUEUEING_ENABLED)
+//   • BUILDING      — queued ONLY if funding ≤ buildingMinFundingApr (Strategy B)
+//   • FUNDING       — never queued (informational crowded-long flag only)
+// This summary applies that filter so the win rate reflects real trading.
+
+const WIN_VERDICTS = ["DROPPED", "PUMP+DUMP"];
+
+interface QueuedEntry {
+  firedAtStr: string;
+  type: "PUMP_TOP" | "EXHAUSTION" | "TREND_BREAK" | "BUILDING";
+  entryPrice: number;
+  fundingApr: number;
+  verdict: string;
+  finalPricePct: number;
+  maxPricePct: number;
+  minPricePct: number; // peak favorable excursion (price low; negative = good for short)
+  trendingAtFire?: boolean; // PUMP_TOP only: coin parabolic when signal fired
+}
+
+// Mirrors live_scanner.ts getConfidence(): the scanner queues EXHAUSTION only
+// at HIGH/MEDIUM confidence. EXHAUSTION confidence is LOW when there is no
+// prior BUILDING, or when BUILDING fired < 2h ago. So an EXHAUSTION is
+// queueable only if a BUILDING preceded it by ≥ 2 hours.
+// (TREND_BREAK is always HIGH; BUILDING is gated by funding, not confidence.)
+function exhaustionQueueable(msSinceBuilding: number | null): boolean {
+  if (msSinceBuilding === null) return false;
+  return msSinceBuilding / 3_600_000 >= 2;
+}
+
+// EXHAUSTION queueing is SUSPENDED pending investigation.
+// Universe backtest (584 coins, 60d): 7 queued EXHAUSTION signals, realized
+// P&L -20% to -4% per trade, 86% stopped out — the only signal type with
+// negative expectancy. The detector appears to fire while squeezes are still
+// accelerating (BSB +86%, PLAYSOUT +70% adverse AFTER the exhaustion signal).
+// This flag keeps EXHAUSTION detection/alerts intact but stops it being
+// queued for the executor. Re-enable once the detection logic is fixed and
+// re-validated on the full universe.
+const EXHAUSTION_QUEUEING_ENABLED = false;
+
+function collectQueuedSignals(
+  result: CoinResult,
+  config: Config,
+): { queued: QueuedEntry[]; blockedBuilding: QueuedEntry[] } {
+  const queued: QueuedEntry[] = [];
+  const blockedBuilding: QueuedEntry[] = [];
+
+  // PUMP_TOP — always queued
+  for (const o of result.pumpOutcomes) {
+    const sig = o.signal as PumpSignal;
+    queued.push({
+      firedAtStr: sig.firedAtStr,
+      type: "PUMP_TOP",
+      entryPrice: sig.entryPrice,
+      fundingApr: sig.fundingApr,
+      verdict: o.verdict,
+      finalPricePct: o.finalPricePct,
+      maxPricePct: o.maxPricePct,
+      minPricePct: o.minPricePct,
+      trendingAtFire: sig.trendingAtFire,
+    });
+  }
+
+  // SQUEEZE — TREND_BREAK always queued (HIGH confidence),
+  // EXHAUSTION queued only at HIGH/MEDIUM confidence (≥2h after a BUILDING),
+  // BUILDING gated by funding threshold.
+  for (const o of result.squeezeOutcomes) {
+    const sig = o.signal as unknown as SqueezeSignal;
+    const entry: QueuedEntry = {
+      firedAtStr: sig.firedAtStr,
+      type: sig.signalPhase,
+      entryPrice: sig.entryPrice,
+      fundingApr: sig.fundingApr,
+      verdict: o.verdict,
+      finalPricePct: o.finalPricePct,
+      maxPricePct: o.maxPricePct,
+      minPricePct: o.minPricePct,
+    };
+    if (sig.signalPhase === "BUILDING") {
+      if (sig.fundingApr <= config.buildingMinFundingApr) {
+        queued.push(entry);
+      } else {
+        blockedBuilding.push(entry);
+      }
+    } else if (sig.signalPhase === "TREND_BREAK") {
+      queued.push(entry); // always HIGH confidence
+    } else {
+      // EXHAUSTION — queueing SUSPENDED (see EXHAUSTION_QUEUEING_ENABLED).
+      // When re-enabled, still gated to HIGH/MEDIUM confidence: LOW-confidence
+      // exhaustion (no prior BUILDING, or < 2h after one) is never queued.
+      if (
+        EXHAUSTION_QUEUEING_ENABLED &&
+        exhaustionQueueable(sig.msSinceBuilding)
+      ) {
+        queued.push(entry);
+      }
+    }
+  }
+
+  queued.sort((a, b) => a.firedAtStr.localeCompare(b.firedAtStr));
+  blockedBuilding.sort((a, b) => a.firedAtStr.localeCompare(b.firedAtStr));
+  return { queued, blockedBuilding };
+}
+
+// True if the live executor would queue (trade) this outcome.
+// Mirrors collectQueuedSignals — PUMP_TOP / TREND_BREAK always, EXHAUSTION
+// only at HIGH/MEDIUM confidence, BUILDING only when funding ≤ threshold.
+// FUNDING never trades.
+function isOutcomeQueued(o: Outcome, config: Config): boolean {
+  if (o.signalType === "PUMP_TOP") return true;
+  if (o.signalType === "SQUEEZE") {
+    const sig = o.signal as unknown as SqueezeSignal;
+    if (sig.signalPhase === "BUILDING") {
+      return sig.fundingApr <= config.buildingMinFundingApr;
+    }
+    if (sig.signalPhase === "TREND_BREAK") return true;
+    // EXHAUSTION — queueing SUSPENDED (see EXHAUSTION_QUEUEING_ENABLED).
+    return (
+      EXHAUSTION_QUEUEING_ENABLED && exhaustionQueueable(sig.msSinceBuilding)
+    );
+  }
+  return false; // FUNDING / POST_PUMP_REVERSAL — informational, never traded
+}
+
+function printQueuedSummary(results: CoinResult[], config: Config): void {
+  console.log("\n" + "═".repeat(62));
+  console.log("  QUEUED SIGNALS — what the live executor would trade");
+  console.log("═".repeat(62));
+  console.log(
+    `  Rule: PUMP_TOP and TREND_BREAK always queued.\n` +
+      `        EXHAUSTION queueing SUSPENDED (negative realized P&L — under review).\n` +
+      `        BUILDING queued only if funding ≤ ${config.buildingMinFundingApr}% APR (Strategy B).\n` +
+      `        FUNDING signals are informational — never queued.`,
+  );
+
+  let grandQueued = 0;
+  let grandWins = 0;
+
+  for (const result of results) {
+    const { queued, blockedBuilding } = collectQueuedSignals(result, config);
+
+    console.log("\n  ── " + result.coin + " ──");
+    if (!queued.length && !blockedBuilding.length) {
+      console.log("  No tradeable signals.");
+      continue;
+    }
+
+    for (const q of queued) {
+      const win = WIN_VERDICTS.includes(q.verdict);
+      const icon = win ? "✅" : q.verdict === "SQUEEZED" ? "❌" : "😐";
+      const fundingNote =
+        q.type === "BUILDING"
+          ? `  funding:${q.fundingApr.toFixed(0)}%APR ✓≤${config.buildingMinFundingApr}`
+          : q.type === "PUMP_TOP" && q.trendingAtFire
+            ? `  ⚠️ PARABOLIC TREND at fire`
+            : "";
+      console.log(
+        `  ${icon} QUEUED   ${q.firedAtStr}  ${q.type.padEnd(11)} ` +
+          `entry=$${q.entryPrice.toFixed(6)}  final:${s(q.finalPricePct)}%  → ${q.verdict}${fundingNote}`,
+      );
+      grandQueued++;
+      if (win) grandWins++;
+    }
+
+    for (const b of blockedBuilding) {
+      console.log(
+        `  ⊘ BLOCKED  ${b.firedAtStr}  BUILDING    ` +
+          `entry=$${b.entryPrice.toFixed(6)}  funding:${b.fundingApr.toFixed(0)}%APR ` +
+          `(> ${config.buildingMinFundingApr}% — Strategy B filter rejects)` +
+          `  [would have been ${b.verdict}]`,
+      );
+    }
+
+    const coinWins = queued.filter((q) =>
+      WIN_VERDICTS.includes(q.verdict),
+    ).length;
+    if (queued.length) {
+      console.log(
+        `  → ${coinWins}/${queued.length} queued signals won` +
+          ` (${((coinWins / queued.length) * 100).toFixed(0)}% win rate)`,
+      );
+    }
+  }
+
+  console.log("\n" + "─".repeat(62));
+  if (grandQueued) {
+    console.log(
+      `  TOTAL: ${grandWins}/${grandQueued} queued signals won` +
+        ` — ${((grandWins / grandQueued) * 100).toFixed(0)}% win rate` +
+        ` across ${results.length} coin(s)`,
+    );
+  } else {
+    console.log("  TOTAL: no queued signals across any coin.");
+  }
+  console.log("═".repeat(62));
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Chart generation
@@ -2027,6 +2379,7 @@ function generateChartHTML(results: CoinResult[], config: Config): string {
             fundingApr: o.signal.fundingApr,
             entryPrice: o.signal.entryPrice,
             finalPct: o.finalPricePct,
+            queued: isOutcomeQueued(o, config),
             // Detail window: 48h before + lookahead after signal
             detail: (() => {
               const winStart = o.signal.firedAtMs - 48 * 3600_000;
@@ -2062,6 +2415,7 @@ function generateChartHTML(results: CoinResult[], config: Config): string {
                 minPct: o.minPricePct,
                 finalPct: o.finalPricePct,
                 firedAtStr: o.signal.firedAtStr,
+                queued: isOutcomeQueued(o, config),
               };
             })(),
           };
@@ -2075,6 +2429,26 @@ function generateChartHTML(results: CoinResult[], config: Config): string {
         ...funding.filter((v): v is number => v !== null),
         0,
       );
+
+      // Queued = what the live executor would actually trade.
+      const allOutcomesForQueue = [
+        ...outcomes,
+        ...pumpOutcomes,
+        ...squeezeOutcomes,
+      ];
+      const queuedOutcomes = allOutcomesForQueue.filter((o) =>
+        isOutcomeQueued(o, config),
+      );
+      const queuedWins = queuedOutcomes.filter((o) =>
+        ["DROPPED", "PUMP+DUMP"].includes(o.verdict),
+      ).length;
+      const blockedBuildingCount = squeezeOutcomes.filter((o) => {
+        const sig = o.signal as unknown as SqueezeSignal;
+        return (
+          sig.signalPhase === "BUILDING" &&
+          sig.fundingApr > config.buildingMinFundingApr
+        );
+      }).length;
 
       return {
         coin,
@@ -2093,6 +2467,13 @@ function generateChartHTML(results: CoinResult[], config: Config): string {
         avgFinal: outcomes.length
           ? avgArr(outcomes.map((o) => o.finalPricePct))
           : null,
+        queuedCount: queuedOutcomes.length,
+        queuedWins,
+        queuedWinRate: queuedOutcomes.length
+          ? ((queuedWins / queuedOutcomes.length) * 100).toFixed(0)
+          : null,
+        blockedBuildingCount,
+        buildingMinFundingApr: config.buildingMinFundingApr,
         maxFunding,
         threshold: config.fundingAprThreshold,
         days: config.days,
@@ -2104,10 +2485,18 @@ function generateChartHTML(results: CoinResult[], config: Config): string {
   const dataJson = JSON.stringify(chartData);
 
   const coinSections = results
-    .map(({ coin, outcomes }) => {
+    .map(({ coin, outcomes, pumpOutcomes, squeezeOutcomes }) => {
       const winners = outcomes.filter((o) =>
         ["DROPPED", "PUMP+DUMP"].includes(o.verdict),
       ).length;
+      const allOut = [...outcomes, ...pumpOutcomes, ...squeezeOutcomes];
+      const queuedOut = allOut.filter((o) => isOutcomeQueued(o, config));
+      const queuedWins = queuedOut.filter((o) =>
+        ["DROPPED", "PUMP+DUMP"].includes(o.verdict),
+      ).length;
+      const queuedWinRate = queuedOut.length
+        ? ((queuedWins / queuedOut.length) * 100).toFixed(0) + "%"
+        : "—";
       return `
 <section class="coin-section" id="section-${coin}">
   <h2>${coin} <span class="tag" id="tag-${coin}">${outcomes.length} signal${outcomes.length !== 1 ? "s" : ""}</span></h2>
@@ -2116,7 +2505,8 @@ function generateChartHTML(results: CoinResult[], config: Config): string {
     <div class="stat-card green"><div class="stat-v">${winners}</div><div class="stat-l">Winners</div></div>
     <div class="stat-card red"><div class="stat-v">${outcomes.filter((o) => o.verdict === "SQUEEZED").length}</div><div class="stat-l">Squeezed</div></div>
     <div class="stat-card"><div class="stat-v">${outcomes.length ? ((winners / outcomes.length) * 100).toFixed(0) + "%" : "—"}</div><div class="stat-l">Win rate</div></div>
-    <div class="stat-card"><div class="stat-v">${outcomes.length ? s(avgArr(outcomes.map((o) => o.finalPricePct))) + "%" : "—"}</div><div class="stat-l">Avg ${config.lookaheadHours}h</div></div>
+    <div class="stat-card queued"><div class="stat-v">${queuedOut.length}</div><div class="stat-l">Queued (traded)</div></div>
+    <div class="stat-card queued"><div class="stat-v">${queuedWinRate}</div><div class="stat-l">Queued win rate</div></div>
     <div class="stat-card"><div class="stat-v">${config.fundingAprThreshold}%</div><div class="stat-l">Gate 1 APR</div></div>
   </div>
   ${
@@ -2161,7 +2551,11 @@ h3.dh{color:#94a3b8;font-size:1rem;margin:28px 0 14px}
 .overview-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-bottom:18px}
 .stat-card{background:#1e293b;border-radius:10px;padding:14px 16px;border:1px solid #334155}
 .stat-card.green{border-color:#22c55e44}.stat-card.red{border-color:#ef444444}
+.stat-card.queued{border-color:#3b82f688;background:#1e293bcc}
 .stat-v{font-size:1.5rem;font-weight:700;color:#f1f5f9}.stat-l{font-size:.75rem;color:#64748b;margin-top:2px}
+.qbadge{font-size:.62rem;font-weight:700;padding:2px 7px;border-radius:5px;letter-spacing:.04em;margin-left:8px}
+.qbadge.q{background:#3b82f622;color:#60a5fa;border:1px solid #3b82f6}
+.qbadge.n{background:#64748b22;color:#94a3b8;border:1px solid #475569}
 .chart-wrap{background:#1e293b;border-radius:10px;padding:16px;margin-bottom:12px;border:1px solid #334155;position:relative}
 .chart-wrap.big{height:320px}.chart-wrap.med{height:180px}.chart-wrap.dc{height:220px;padding:0;border:none;margin:0}
 .chart-loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#475569;font-size:.85rem;pointer-events:none}
@@ -2193,6 +2587,8 @@ canvas{display:block;width:100%!important;height:100%!important}
   <div class="legend-item"><div class="ldot" style="background:#f97316"></div>PUMP+DUMP ✅</div>
   <div class="legend-item"><div class="ldot" style="background:#ef4444"></div>SQUEEZED ❌</div>
   <div class="legend-item"><div class="ldot" style="background:#94a3b8"></div>NEUTRAL 😐</div>
+  <div class="legend-item"><span style="color:#60a5fa;font-weight:700">━━</span>&nbsp;solid = QUEUED (executor trades it)</div>
+  <div class="legend-item"><span style="color:#64748b">┈┈</span>&nbsp;dashed = informational (not traded)</div>
 </div>
 ${coinSections}
 <script>
@@ -2236,12 +2632,17 @@ function darkScales(extraY) {
 function sigAnnotations(signals, displayLen, lookahead) {
   const ann = {};
   signals.forEach((sig, i) => {
-    ann['sl'+i] = { type:'line', xMin:sig.idx, xMax:sig.idx, borderColor:sig.colour, borderWidth:2, borderDash:[5,3] };
-    ann['sb'+i] = { type:'box', xMin:sig.idx, xMax:sig.endIdx, backgroundColor:sig.colour+'18', borderWidth:0 };
+    // Queued (traded) signals = solid bold line. Informational = thin dashed.
+    ann['sl'+i] = { type:'line', xMin:sig.idx, xMax:sig.idx, borderColor:sig.colour,
+      borderWidth: sig.queued ? 3 : 1.5, borderDash: sig.queued ? [] : [4,4] };
+    ann['sb'+i] = { type:'box', xMin:sig.idx, xMax:sig.endIdx,
+      backgroundColor:sig.colour+(sig.queued?'22':'10'), borderWidth:0 };
     ann['lbl'+i] = { type:'label', xValue:sig.idx, yValue:'center',
-      content:['🔴 SIGNAL', sig.verdict, (sig.fundingApr ?? 0).toFixed(1)+'% APR'],
-      backgroundColor:sig.colour+'33', borderColor:sig.colour, borderWidth:1, borderRadius:4,
-      font:{size:10}, color:'#f1f5f9', padding:5, position:{x:'center',y:'start'} };
+      content:[sig.queued?'🔴 QUEUED — TRADED':'⚪ not traded', sig.verdict, (sig.fundingApr ?? 0).toFixed(1)+'% APR'],
+      backgroundColor:sig.colour+(sig.queued?'44':'22'), borderColor:sig.colour,
+      borderWidth: sig.queued ? 1.5 : 1, borderRadius:4,
+      font:{size:10, weight: sig.queued ? 'bold' : 'normal'}, color:'#f1f5f9', padding:5,
+      position:{x:'center',y:'start'} };
   });
   return ann;
 }
@@ -2313,6 +2714,7 @@ window.addEventListener('load', function() {
       card.style.borderTopColor = det.colour;
       card.innerHTML =
         '<div class="dhead"><span class="badge" style="background:'+det.colour+'22;color:'+det.colour+';border:1px solid '+det.colour+'">'+(det.signalType==="SQUEEZE" && det.signalPhase ? det.signalPhase+' — ' : det.signalType==="PUMP_TOP" ? 'PUMP TOP — ' : '')+det.verdict+'</span>'+
+        '<span class="qbadge '+(det.queued?'q':'n')+'">'+(det.queued?'✓ QUEUED — TRADED':'○ NOT TRADED')+'</span>'+
         '<span class="dtime">🔴 Alert sent at '+det.firedAtStr+'</span></div>'+
         '<div class="dstats">'+
           '<span>Entry <strong>$'+det.entryPrice.toFixed(4)+'</strong></span>'+
@@ -2432,6 +2834,7 @@ function saveJSON(results: CoinResult[], config: Config): void {
             minPct: Math.round(o.minPricePct * 100) / 100,
             finalPct: Math.round(o.finalPricePct * 100) / 100,
             verdict: o.verdict,
+            trendingAtFire: (o.signal as PumpSignal).trendingAtFire,
           })),
         },
         squeeze: {
@@ -2462,6 +2865,37 @@ function saveJSON(results: CoinResult[], config: Config): void {
             };
           }),
         },
+        queued: (() => {
+          // What the live executor would actually trade (see printQueuedSummary).
+          const { queued, blockedBuilding } = collectQueuedSignals(r, config);
+          const qWins = queued.filter((q) =>
+            WIN_VERDICTS.includes(q.verdict),
+          ).length;
+          return {
+            signals: queued.length,
+            wins: qWins,
+            winRate: queued.length
+              ? Math.round((qWins / queued.length) * 100)
+              : null,
+            blockedBuilding: blockedBuilding.length,
+            signals_detail: queued.map((q) => ({
+              firedAt: q.firedAtStr,
+              type: q.type,
+              entry: Math.round(q.entryPrice * 1000000) / 1000000,
+              fundingApr: q.fundingApr,
+              finalPct: Math.round(q.finalPricePct * 100) / 100,
+              maxPct: Math.round(q.maxPricePct * 100) / 100,
+              minPct: Math.round(q.minPricePct * 100) / 100,
+              verdict: q.verdict,
+              trendingAtFire: q.trendingAtFire ?? false,
+            })),
+            blocked_detail: blockedBuilding.map((b) => ({
+              firedAt: b.firedAtStr,
+              fundingApr: b.fundingApr,
+              wouldHaveBeen: b.verdict,
+            })),
+          };
+        })(),
       };
     }),
   };
@@ -2577,6 +3011,7 @@ interface Args {
   exhaustMaxFundingApr: number; // funding must be ABOVE this to count as exhaustion (default -20%)
   exhaustMinOiDrop: number; // OI must have dropped this % for exhaustion to fire (0 = disabled)
   squeezeMinOiDrop: number;
+  buildingMinFundingApr: number; // BUILDING queued only if funding ≤ this (Strategy B filter, default -200%)
   trendFilter: boolean;
   trendDays7Pct: number;
   trendDays14Pct: number;
@@ -2603,21 +3038,22 @@ function parseArgs(): Args {
       .map((c) => c.trim().toUpperCase())
       .filter(Boolean),
     days: parseInt(g("--days", "90"), 10),
-    lookaheadHours: parseInt(g("--lookahead", "24"), 10),
-    fundingAprThreshold: parseFloat(g("--threshold", "50")),
-    minPositiveReadings: parseInt(g("--min-positive", "6"), 10),
-    minOiChangePct: parseFloat(g("--min-oi", "5")),
-    maxPriceChangePct: parseFloat(g("--max-price", "0.5")),
+    lookaheadHours: parseInt(g("--lookahead", "48"), 10), // validated: 48h
+    fundingAprThreshold: parseFloat(g("--threshold", "10")), // validated: 10%
+    minPositiveReadings: parseInt(g("--min-positive", "2"), 10), // validated: 2
+    minOiChangePct: parseFloat(g("--min-oi", "2")), // validated: 2%
+    maxPriceChangePct: parseFloat(g("--max-price", "2")), // validated: 2%
     pumpMinPct: parseFloat(g("--pump-pct", "19")),
-    pumpMinVolMult: parseFloat(g("--pump-vol", "8")),
+    pumpMinVolMult: parseFloat(g("--pump-vol", "5")), // validated: 5×
     pumpMinRsi: parseFloat(g("--pump-rsi", "88")),
-    pumpMinFundingApr: parseFloat(g("--pump-funding", "50")),
+    pumpMinFundingApr: parseFloat(g("--pump-funding", "0")), // validated: 0%
     squeezeMinPct: parseFloat(g("--squeeze-pct", "20")),
-    squeezeHours: parseInt(g("--squeeze-hours", "6"), 10),
-    squeezeMaxFundingApr: parseFloat(g("--squeeze-funding", "-10")),
+    squeezeHours: parseInt(g("--squeeze-hours", "10"), 10), // validated: 10h
+    squeezeMaxFundingApr: parseFloat(g("--squeeze-funding", "-100")), // validated: -100%
     exhaustMaxFundingApr: parseFloat(g("--exhaust-funding", "-20")),
-    exhaustMinOiDrop: parseFloat(g("--exhaust-oi-drop", "0")),
-    squeezeMinOiDrop: parseFloat(g("--squeeze-oi-drop", "3")),
+    exhaustMinOiDrop: parseFloat(g("--exhaust-oi-drop", "3")), // validated: 3%
+    squeezeMinOiDrop: parseFloat(g("--squeeze-oi-drop", "0")), // validated: 0%
+    buildingMinFundingApr: parseFloat(g("--building-min-funding", "-200")), // Strategy B: BUILDING queued only if funding ≤ this
     dataSource: g("--source", "bybit") as "bybit" | "binance" | "hl",
     trendFilter: !a.includes("--no-trend-filter"),
     trendDays7Pct: parseFloat(g("--trend-7d", "30")),

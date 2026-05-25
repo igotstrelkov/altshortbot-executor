@@ -98,6 +98,7 @@ const FUNDING_COOLDOWN_MS = 8 * HOUR; // Gate 1 re-fires once per settlement cyc
 // Re-fire BUILDING when funding becomes 2× more extreme than when it first fired.
 // E.g.: first fire at -300% APR → re-fire when funding reaches -600% APR.
 const BUILDING_REFIRE_MULTIPLIER = 2.0;
+const MIN_FUNDING_APR = -200;
 const MIN_EXHAUSTION_GAP_H = 6; // Exhaustion re-fire minimum gap (hours)
 const STATE_FILE = "scanner_state.json";
 const BB_BASE = "https://api.bybit.com";
@@ -815,7 +816,7 @@ function formatAlert(alert: Alert): string {
     // BUILDING is auto-traded when funding ≤ -200% APR (validated profitable
     // regime: 9/9 winners). Above that threshold it's informational only —
     // mega-squeezes have run another 80%+ before reversing.
-    if (alert.fundingApr <= -200) {
+    if (alert.fundingApr <= MIN_FUNDING_APR) {
       lines.push("", `📐 Short entry — extreme funding squeeze (auto-queued)`);
     } else {
       lines.push("", `⏳ Do NOT short yet — await exhaustion signal`);
@@ -931,23 +932,32 @@ async function main(): Promise<void> {
     }
 
     // Queue tradeable signals for the executor.
-    //   • HIGH/MEDIUM EXHAUSTION & TREND_BREAK — the original tradeable set.
+    //   • PUMP_TOP — validated tradeable signal (universe backtest: 76% win).
+    //   • TREND_BREAK (HIGH/MEDIUM) — parabolic blow-off short.
     //   • BUILDING with fundingApr ≤ -200% APR — validated profitable: 9/9
     //     paper-observed winners over 10d (avg +11% at 1×, ~+33% at 3×).
     //     Above -200% (e.g. -100%) entered mega-squeezes where price ran
     //     80%+ higher before reversing, so they're excluded.
+    //   • EXHAUSTION — queueing SUSPENDED. Universe backtest showed negative
+    //     realized P&L (-20% to -4%/trade, 86% stopped) — the detector fires
+    //     while squeezes are still accelerating. Telegram alerts still fire
+    //     for observability; re-enable once the detector is fixed.
     // LOW confidence stays Telegram-only — too risky for auto-execution.
     // DRY_RUN suppresses queue writes so a hand-triggered scan can't bleed into
     // the executor's pickup. Telegram still fires (above) for observability.
     if (!DRY_RUN) {
       const isExhaustionOrBreak =
-        (alert.type === "EXHAUSTION" || alert.type === "TREND_BREAK") &&
+        alert.type === "TREND_BREAK" &&
         (alert.confidence === "HIGH" || alert.confidence === "MEDIUM");
 
       const isExtremeBuilding =
-        alert.type === "BUILDING" && alert.fundingApr <= -200;
+        alert.type === "BUILDING" && alert.fundingApr <= MIN_FUNDING_APR;
 
-      if (isExhaustionOrBreak || isExtremeBuilding) {
+      // PUMP_TOP fires at HIGH confidence and is a validated tradeable signal
+      // (universe backtest: 76% win rate). Always queued for the executor.
+      const isPumpTop = alert.type === "PUMP_TOP";
+
+      if (isExhaustionOrBreak || isExtremeBuilding || isPumpTop) {
         appendToQueue(alert);
       }
     }
