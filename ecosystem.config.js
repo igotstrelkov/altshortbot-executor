@@ -61,7 +61,7 @@ module.exports = {
       // Run once and exit — PM2 restarts on cron schedule.
       // ── KEEP `--paper` UNTIL YOU'VE VALIDATED 2-4 WEEKS OF PAPER P&L. ──
       script: "npx",
-      args: "tsx bybit_executor.ts",
+      args: "tsx kucoin_executor.ts",
 
       // Every 5 minutes
       cron_restart: "*/5 * * * *",
@@ -75,9 +75,10 @@ module.exports = {
         NODE_ENV: "production",
         TELEGRAM_TOKEN: process.env.TELEGRAM_TOKEN ?? "",
         TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID ?? "",
-        BYBIT_API_KEY: process.env.BYBIT_API_KEY ?? "",
-        BYBIT_API_SECRET: process.env.BYBIT_API_SECRET ?? "",
-        BYBIT_PAPER_ACCOUNT: "10000", // simulated account size for paper mode
+        KUCOIN_API_KEY: process.env.KUCOIN_API_KEY ?? "",
+        KUCOIN_API_SECRET: process.env.KUCOIN_API_SECRET ?? "",
+        KUCOIN_API_PASSPHRASE: process.env.KUCOIN_API_PASSPHRASE ?? "",
+        KUCOIN_PAPER_ACCOUNT: "10000", // simulated account size for paper mode
       },
     },
   ],
