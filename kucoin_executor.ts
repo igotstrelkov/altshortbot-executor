@@ -14,6 +14,8 @@
  *     contract = `multiplier` coins. Sizing converts notional → contracts.
  *   - 3 credentials (key + secret + passphrase), not 2.
  *   - Leverage is passed inline on the order — there is no separate setLeverage.
+ *   - Margin mode is per-symbol: the executor forces ISOLATED on each contract
+ *     before entry (KuCoin rejects an order whose mode mismatches — err 330005).
  *   - Symbols are `{COIN}USDTM`, and BTC is `XBT` (so `XBTUSDTM`).
  *   - The SDK returns the full `{ code, data }` envelope — we read `.data`.
  *
@@ -342,6 +344,29 @@ async function openShort(
   if (IS_PAPER) return "PAPER";
 
   try {
+    // 0) Ensure the contract is in ISOLATED margin mode before ordering.
+    //    KuCoin sets margin mode per-symbol; an order whose implied mode does
+    //    not match the contract's current mode is rejected (error 330005).
+    //    ISOLATED is required: it caps each position's loss to its own margin,
+    //    matching the strategy's independent-position risk model. updateMarginMode
+    //    is idempotent — setting ISOLATED when already ISOLATED is harmless.
+    try {
+      const mmRes = (await client.updateMarginMode({
+        symbol,
+        marginMode: "ISOLATED",
+      })) as KucoinEnvelope<any>;
+      if (mmRes?.code !== KC_OK) {
+        await alertError(
+          `openShort(${symbol}) — could not set ISOLATED margin mode`,
+          `KuCoin ${mmRes?.code ?? "?"}: ${mmRes?.msg ?? "(no message)"}`,
+        );
+        return null; // do not order into an unknown margin mode
+      }
+    } catch (e) {
+      await alertError(`openShort(${symbol}) — setMarginMode`, e);
+      return null;
+    }
+
     // 1) Market short entry.
     const entryRes = (await client.submitOrder({
       clientOid: client.generateNewOrderID(),
