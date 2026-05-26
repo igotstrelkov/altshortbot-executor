@@ -45,10 +45,10 @@ const PAPER_ACCOUNT = parseFloat(process.env.BYBIT_PAPER_ACCOUNT ?? "10000");
 
 const RISK = {
   maxLeverage: 3,
-  riskPerTrade: 0.03, // 3% account risk per trade
-  stopLossPct: 0.2, // 20% stop loss
-  maxPositions: 10, // max concurrent open positions
-  timeoutH: 48, // close after 48h regardless
+  riskPerTrade: 0.03,
+  stopLossPct: 0.15, // ← was 0.20
+  maxPositions: 10,
+  timeoutH: 48,
 } as const;
 
 const QUEUE_FILE = "signal_queue.json";

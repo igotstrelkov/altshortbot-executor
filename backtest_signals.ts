@@ -158,6 +158,7 @@ interface SqueezeSignal {
   cumulativePct: number;
   squeezeHours: number;
   oiDropPct: number;
+  hadOiData: boolean; // OI history was available at fire hour (gate can be applied)
   fundingApr: number;
   signalPhase: "BUILDING" | "EXHAUSTION" | "TREND_BREAK";
   trendBreak: boolean;
@@ -744,6 +745,7 @@ function detectShortSqueeze(
   phase: "BUILDING" | "EXHAUSTION" | null;
   cumulativePct: number;
   oiDropPct: number;
+  hadOiData: boolean;
   fundingApr: number;
 } {
   const none = {
@@ -751,6 +753,7 @@ function detectShortSqueeze(
     phase: null as null,
     cumulativePct: 0,
     oiDropPct: 0,
+    hadOiData: false,
     fundingApr: 0,
   };
   const N = config.squeezeHours;
@@ -767,10 +770,14 @@ function detectShortSqueeze(
   // OI drop — computed when squeezeMinOiDrop OR exhaustMinOiDrop > 0
   // (USD OI is unreliable during squeezes because price rise inflates it)
   let oiDropPct = 0;
-  if (
-    (config.squeezeMinOiDrop > 0 || config.exhaustMinOiDrop > 0) &&
-    oiSeriesArr.length >= 2
-  ) {
+  // hadOiData: true only when OI history was actually available AND used.
+  // Bybit OI history covers ~8 days, so older signals in a long backtest
+  // have no OI — the OI gate must fail-open (pass) on those, matching the
+  // live scanner's `oiDropPct ?? 0` default.
+  const oiComputable =
+    config.squeezeMinOiDrop > 0 || config.exhaustMinOiDrop > 0;
+  const hadOiData = oiComputable && oiSeriesArr.length >= 2;
+  if (oiComputable && oiSeriesArr.length >= 2) {
     const oiStart = oiSeriesArr[Math.max(0, oiSeriesArr.length - N - 1)];
     const oiNow = oiSeriesArr[oiSeriesArr.length - 1];
     oiDropPct = oiStart > 0 ? ((oiStart - oiNow) / oiStart) * 100 : 0;
@@ -819,6 +826,7 @@ function detectShortSqueeze(
       phase: "BUILDING",
       cumulativePct,
       oiDropPct,
+      hadOiData,
       fundingApr,
     };
   if (isExhausting)
@@ -827,6 +835,7 @@ function detectShortSqueeze(
       phase: "EXHAUSTION",
       cumulativePct,
       oiDropPct,
+      hadOiData,
       fundingApr,
     };
   return {
@@ -834,6 +843,7 @@ function detectShortSqueeze(
     phase: null,
     cumulativePct,
     oiDropPct,
+    hadOiData,
     fundingApr,
   };
 }
@@ -1401,6 +1411,7 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
               cumulativePct: Math.round(sq.cumulativePct * 10) / 10,
               squeezeHours: config.squeezeHours,
               oiDropPct: Math.round(sq.oiDropPct * 10) / 10,
+              hadOiData: sq.hadOiData,
               fundingApr: Math.round(sq.fundingApr * 10) / 10,
               signalPhase: phase,
               trendBreak: isTrendBreak,
@@ -2148,6 +2159,8 @@ interface QueuedEntry {
   finalPricePct: number;
   maxPricePct: number;
   minPricePct: number; // peak favorable excursion (price low; negative = good for short)
+  oiDropPct?: number; // BUILDING only: OI drop % at fire (negative = OI rising)
+  hadOiData?: boolean; // BUILDING only: OI history available — OI gate evaluable
   trendingAtFire?: boolean; // PUMP_TOP only: coin parabolic when signal fired
 }
 
@@ -2208,6 +2221,8 @@ function collectQueuedSignals(
       finalPricePct: o.finalPricePct,
       maxPricePct: o.maxPricePct,
       minPricePct: o.minPricePct,
+      oiDropPct: sig.oiDropPct,
+      hadOiData: sig.hadOiData,
     };
     if (sig.signalPhase === "BUILDING") {
       if (sig.fundingApr <= config.buildingMinFundingApr) {
@@ -2888,6 +2903,8 @@ function saveJSON(results: CoinResult[], config: Config): void {
               minPct: Math.round(q.minPricePct * 100) / 100,
               verdict: q.verdict,
               trendingAtFire: q.trendingAtFire ?? false,
+              oiDropPct: q.oiDropPct ?? 0,
+              hadOiData: q.hadOiData ?? false,
             })),
             blocked_detail: blockedBuilding.map((b) => ({
               firedAt: b.firedAtStr,

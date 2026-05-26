@@ -23,7 +23,12 @@ export interface PositionRecord {
   stopLossPx: number;
   targetPx: number;
   trailingActive: boolean;
-  signalType: "EXHAUSTION" | "TREND_BREAK" | "BUILDING";
+  // The four queueable signal types — every type that can reach an executor
+  // and become a position. FUNDING is excluded (never queued). EXHAUSTION is
+  // retained: queueing is currently suspended but the type stays valid (the
+  // suspension is reversible). Executors narrow the 5-member Alert["type"] to
+  // this with a cast — a safe narrowing, since FUNDING never reaches them.
+  signalType: "PUMP_TOP" | "BUILDING" | "EXHAUSTION" | "TREND_BREAK";
   signalConfidence: "HIGH" | "MEDIUM";
   stopOid?: number;
   isPaper: boolean;
@@ -40,7 +45,11 @@ export interface PaperTrade {
   sizeCoin: number;
   pnlUsdc: number;
   pnlPct: number;
-  closeReason: "stop" | "target" | "trailing" | "timeout" | "manual";
+  // Exit reasons the executors actually produce. "stop" and "timeout" are the
+  // two automated exits (no take-profit, no trailing stop); "manual" covers a
+  // position closed by hand. The former "target" and "trailing" values were
+  // removed — the executors have no take-profit or trailing-stop logic.
+  closeReason: "stop" | "timeout" | "manual";
   signalType: string;
   confidence: string;
 }
