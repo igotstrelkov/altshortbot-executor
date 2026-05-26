@@ -38,8 +38,8 @@
  *   npx tsx kucoin_executor.ts            ← LIVE — real orders
  */
 
-import { FuturesClient } from "kucoin-api";
 import { existsSync, readFileSync, writeFileSync } from "fs";
+import { FuturesClient } from "kucoin-api";
 import { fileURLToPath } from "url";
 import type {
   PaperTrade,
@@ -110,8 +110,34 @@ async function sendTelegram(msg: string): Promise<void> {
   }
 }
 
+/**
+ * Render any thrown value as a readable string. The KuCoin SDK throws plain
+ * objects (its { code, msg } error body), not Error instances — `String(obj)`
+ * on those yields the useless "[object Object]". This unwraps the common
+ * shapes: Error.message, a KuCoin { code, msg }, a nested response body, and
+ * falls back to JSON so nothing is ever stringified to "[object Object]".
+ */
+function describeError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (err && typeof err === "object") {
+    const e = err as Record<string, any>;
+    // KuCoin REST error body — possibly nested under .response.data / .body.
+    const body = e.response?.data ?? e.body ?? e;
+    if (body && typeof body === "object" && (body.code || body.msg)) {
+      return `KuCoin ${body.code ?? "?"}: ${body.msg ?? "(no message)"}`;
+    }
+    if (typeof e.message === "string") return e.message;
+    try {
+      return JSON.stringify(err);
+    } catch {
+      return "(unserializable error object)";
+    }
+  }
+  return String(err);
+}
+
 async function alertError(ctx: string, err: unknown): Promise<void> {
-  const msg = err instanceof Error ? err.message : String(err);
+  const msg = describeError(err);
   console.error(`[ERROR] ${ctx}: ${msg}`);
   await sendTelegram(`🚨 *altshortbot* — ${ctx}\n\`${msg}\``);
 }
@@ -139,6 +165,7 @@ function toKucoinSymbol(coin: string): string {
 
 interface KucoinEnvelope<T> {
   code?: string;
+  msg?: string; // KuCoin error message on a non-200000 response
   data?: T;
 }
 
@@ -285,8 +312,7 @@ function calcSize(
 ): SizeResult {
   const riskUsdt = equity * RISK.riskPerTrade;
   const targetNotional = riskUsdt / RISK.stopLossPct;
-  const rawContracts =
-    targetNotional / (entryPrice * spec.multiplier);
+  const rawContracts = targetNotional / (entryPrice * spec.multiplier);
 
   // Round to a lotSize multiple, with a floor of one lot (round-up policy).
   const lot = spec.lotSize > 0 ? spec.lotSize : 1;
@@ -329,8 +355,8 @@ async function openShort(
 
     if (entryRes?.code !== KC_OK) {
       await alertError(
-        `openShort(${symbol})`,
-        `entry code ${entryRes?.code}`,
+        `openShort(${symbol}) entry rejected`,
+        `KuCoin ${entryRes?.code ?? "?"}: ${entryRes?.msg ?? "(no message)"}`,
       );
       return null;
     }
@@ -338,9 +364,10 @@ async function openShort(
 
     // 2) Stop-loss: stop-market close order. stop:'up' fires when price rises
     //    to stopPrice. closeOrder:true closes the position regardless of size.
-    const stopPrice = tickSize > 0
-      ? (Math.round(stopPx / tickSize) * tickSize).toString()
-      : stopPx.toString();
+    const stopPrice =
+      tickSize > 0
+        ? (Math.round(stopPx / tickSize) * tickSize).toString()
+        : stopPx.toString();
     const stopRes = (await client.submitOrder({
       clientOid: client.generateNewOrderID(),
       symbol,
@@ -358,7 +385,7 @@ async function openShort(
       await alertError(
         `openShort(${symbol}) STOP FAILED — position is UNPROTECTED, ` +
           `set a stop manually on KuCoin`,
-        `stop code ${stopRes?.code}`,
+        `KuCoin ${stopRes?.code ?? "?"}: ${stopRes?.msg ?? "(no message)"}`,
       );
     }
     return orderId;
@@ -369,10 +396,7 @@ async function openShort(
 }
 
 /** Close an open position at market (closeOrder closes the full size). */
-async function closePosition(
-  symbol: string,
-  reason: string,
-): Promise<boolean> {
+async function closePosition(symbol: string, reason: string): Promise<boolean> {
   if (IS_PAPER) return true;
   try {
     const res = (await client.submitOrder({
@@ -386,8 +410,8 @@ async function closePosition(
 
     if (res?.code !== KC_OK) {
       await alertError(
-        `closePosition(${symbol}) — ${reason}`,
-        `code ${res?.code} — verify on kucoin.com`,
+        `closePosition(${symbol}) — ${reason} — verify on kucoin.com`,
+        `KuCoin ${res?.code ?? "?"}: ${res?.msg ?? "(no message)"}`,
       );
       return false;
     }
