@@ -22,7 +22,10 @@
  * Exit model — identical to the Bybit executor: a short closes ONLY on
  *   - stop    — price rose stopLossPct above entry, or
  *   - timeout — 48h elapsed.
- * No take-profit, no trailing stop.
+ * No take-profit, no trailing stop. On exit, any untriggered stop order left
+ * resting on the symbol is cancelled — critical on a timeout close, where
+ * openShort's stop never fired and would otherwise survive to trigger against
+ * a future position on the same coin.
  *
  * Modes:
  *   --paper    Simulate trades (no orders). Uses live KuCoin prices for P&L.
@@ -61,8 +64,8 @@ const PAPER_ACCOUNT = parseFloat(process.env.KUCOIN_PAPER_ACCOUNT ?? "10000");
 
 // Risk block — identical values to bybit_executor.ts. See CLAUDE.md.
 const RISK = {
-  maxLeverage: 3,
-  riskPerTrade: 0.03, // 3% account risk per trade
+  maxLeverage: 4,
+  riskPerTrade: 0.04, // 4% account risk per trade
   stopLossPct: 0.15, // 15% stop loss
   maxPositions: 10, // max concurrent open positions
   timeoutH: 48, // close after 48h regardless
@@ -420,7 +423,40 @@ async function openShort(
   }
 }
 
-/** Close an open position at market (closeOrder closes the full size). */
+/**
+ * Cancel any untriggered stop orders left resting on a symbol. Called after a
+ * position is closed so a stale stop-loss (placed by openShort) cannot survive
+ * to trigger against a *future* position on the same coin. Best-effort — a
+ * failure is logged but never blocks the close.
+ */
+async function cancelStopOrders(symbol: string): Promise<void> {
+  if (IS_PAPER) return;
+  try {
+    const res = (await client.cancelAllStopOrders({
+      symbol,
+    })) as KucoinEnvelope<{ cancelledOrderIds?: string[] }>;
+    if (res?.code !== KC_OK) {
+      await alertError(
+        `cancelStopOrders(${symbol}) — stale stop may remain, check kucoin.com`,
+        `KuCoin ${res?.code ?? "?"}: ${res?.msg ?? "(no message)"}`,
+      );
+      return;
+    }
+    const n = res.data?.cancelledOrderIds?.length ?? 0;
+    if (n > 0) console.log(`  ${symbol}: cancelled ${n} resting stop order(s)`);
+  } catch (e) {
+    await alertError(`cancelStopOrders(${symbol})`, e);
+  }
+}
+
+/**
+ * Close an open position at market (closeOrder closes the full size), then
+ * cancel any stop order still resting on the symbol. The cancel matters most
+ * on a TIMEOUT close: openShort placed a resting stop that never fired, and
+ * if left on the book it could trigger against the next position on this coin.
+ * (On a stop-triggered close the stop order is already consumed, but cancelling
+ * is idempotent and harmless.)
+ */
 async function closePosition(symbol: string, reason: string): Promise<boolean> {
   if (IS_PAPER) return true;
   try {
@@ -440,6 +476,8 @@ async function closePosition(symbol: string, reason: string): Promise<boolean> {
       );
       return false;
     }
+    // Close succeeded — clear any stop order left resting on this symbol.
+    await cancelStopOrders(symbol);
     return true;
   } catch (e) {
     await alertError(
@@ -504,8 +542,12 @@ async function managePositions(store: KucoinPositionStore): Promise<void> {
     if (stopHit) {
       closeReason = "stop";
       closePx = IS_PAPER ? pos.stopLossPx : currentPx;
+      // The stop order that fired is already consumed, but cancel defensively
+      // in case of a partial fill or any other order resting on the symbol.
+      if (!IS_PAPER) await cancelStopOrders(symbol);
     } else if (ageH >= RISK.timeoutH) {
       closeReason = "timeout";
+      // closePosition market-closes AND cancels the never-fired resting stop.
       if (!IS_PAPER) await closePosition(symbol, "timeout");
     }
 
