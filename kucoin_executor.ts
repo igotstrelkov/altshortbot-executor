@@ -65,7 +65,7 @@ const PAPER_ACCOUNT = parseFloat(process.env.KUCOIN_PAPER_ACCOUNT ?? "10000");
 // Risk block — identical values to bybit_executor.ts. See CLAUDE.md.
 const RISK = {
   maxLeverage: 4,
-  riskPerTrade: 0.04, // 4% account risk per trade
+  riskPerTrade: 0.06, // 6% account risk per trade
   stopLossPct: 0.15, // 15% stop loss
   maxPositions: 10, // max concurrent open positions
   timeoutH: 48, // close after 48h regardless
