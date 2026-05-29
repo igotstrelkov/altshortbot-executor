@@ -48,7 +48,7 @@ const RISK = {
   riskPerTrade: 0.03,
   stopLossPct: 0.15, // ← was 0.20
   maxPositions: 10,
-  timeoutH: 48,
+  timeoutH: 24,
 } as const;
 
 const QUEUE_FILE = "signal_queue.json";

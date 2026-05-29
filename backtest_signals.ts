@@ -14,7 +14,7 @@ import { writeFileSync } from "fs";
  *     --threshold 10 --min-positive 2 --min-oi 2 --max-price 2 \
  *     --pump-pct 19 --pump-vol 5 --pump-rsi 88 --pump-funding 0 \
  *     --squeeze-pct 20 --squeeze-hours 10 --squeeze-funding -100 --squeeze-oi-drop 0 \
- *     --exhaust-funding -20 --exhaust-oi-drop 3 --lookahead 48 --chart
+ *     --exhaust-funding -20 --exhaust-oi-drop 3 --lookahead 24 --chart
  *     # (no --source needed — bybit is now the default)
  *
  * ── PARAMETER REFERENCE ─────────────────────────────────────────────────────
@@ -51,7 +51,7 @@ import { writeFileSync } from "fs";
  *  GENERAL:
  *   --coin COIN[,...]   Coin name(s), comma-separated
  *   --days N            Lookback period in days                   (tuned: 30)
- *   --lookahead N       Hours after signal to measure outcome     (tuned: 48,  default: 24)
+ *   --lookahead N       Hours after signal to measure outcome     (validated: 24h)
  *   --chart             Generate interactive HTML chart → backtest_chart.html
  *   --output FILE       Save results to CSV
  *   --json FILE         Save results to JSON (used by backtest_test.ts)
@@ -188,12 +188,46 @@ interface PostPumpSignal {
   pumpFiredAtStr: string;
 }
 
+// Compute hours-from-entry at which adverse first crossed each sweep stop.
+// `prices` is the forward price series after entry, with `firedAtMs` as t=0
+// and `hours` the matching hour-from-entry for each price. Returns one entry
+// per STOP_SWEEP_PCTS; null where the stop was never crossed in the window.
+function computeStopHitH(
+  entry: number,
+  hours: number[],
+  prices: number[],
+): StopHitMap {
+  const out: Partial<StopHitMap> = {};
+  for (const pct of STOP_SWEEP_PCTS) {
+    const triggerPx = entry * (1 + pct / 100); // adverse for a SHORT = price rise
+    let hit: number | null = null;
+    for (let i = 0; i < prices.length; i++) {
+      if (prices[i] >= triggerPx) {
+        hit = hours[i];
+        break;
+      }
+    }
+    out[`${pct}` as StopSweepKey] = hit;
+  }
+  return out as StopHitMap;
+}
+
+// Stop widths the analysis tools sweep over — see analyze_stops.ts and
+// simulate_portfolio.ts. Per-signal stopHitH is emitted for each of these so
+// the simulator can release a slot when the stop fires, not at full timeout.
+const STOP_SWEEP_PCTS = [12, 15, 20, 25, 30] as const;
+type StopSweepKey = `${(typeof STOP_SWEEP_PCTS)[number]}`;
+type StopHitMap = Record<StopSweepKey, number | null>;
+
 interface Outcome {
   signal: Signal | PumpSignal | PostPumpSignal;
   signalType: "FUNDING" | "PUMP_TOP" | "SQUEEZE" | "POST_PUMP_REVERSAL";
   maxPricePct: number;
   minPricePct: number;
   finalPricePct: number;
+  // hours-from-entry when adverse (price rise above entry) first crossed each
+  // stop width; null if never crossed within the lookahead window.
+  stopHitH: StopHitMap;
   verdict: string;
 }
 
@@ -1625,10 +1659,23 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
     let maxP = sig.entryPrice,
       minP = sig.entryPrice,
       finalP = sig.entryPrice;
+    const stopHitH: Partial<StopHitMap> = {};
+    for (const pct of STOP_SWEEP_PCTS)
+      stopHitH[`${pct}` as StopSweepKey] = null;
     for (const ts of allHours.filter((t) => t > sig.firedAtMs && t <= fwdEnd)) {
       const p = priceByHour[ts];
       if (!p) continue;
-      if (p > maxP) maxP = p;
+      if (p > maxP) {
+        maxP = p;
+        // record first hour each stop threshold was crossed (adverse for SHORT)
+        const adversePct = ((maxP - sig.entryPrice) / sig.entryPrice) * 100;
+        const hrsFromEntry = (ts - sig.firedAtMs) / 3_600_000;
+        for (const pct of STOP_SWEEP_PCTS) {
+          const key = `${pct}` as StopSweepKey;
+          if (stopHitH[key] === null && adversePct >= pct)
+            stopHitH[key] = hrsFromEntry;
+        }
+      }
       if (p < minP) minP = p;
       finalP = p;
     }
@@ -1649,6 +1696,7 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
       maxPricePct: maxPct,
       minPricePct: minPct,
       finalPricePct: finalPct,
+      stopHitH: stopHitH as StopHitMap,
       verdict,
     });
   }
@@ -1660,10 +1708,23 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
     let maxP = sig.entryPrice,
       minP = sig.entryPrice,
       finalP = sig.entryPrice;
+    const stopHitH: Partial<StopHitMap> = {};
+    for (const pct of STOP_SWEEP_PCTS)
+      stopHitH[`${pct}` as StopSweepKey] = null;
     for (const ts of allHours.filter((t) => t > sig.firedAtMs && t <= fwdEnd)) {
       const p = priceByHour[ts];
       if (!p) continue;
-      if (p > maxP) maxP = p;
+      if (p > maxP) {
+        maxP = p;
+        // record first hour each stop threshold was crossed (adverse for SHORT)
+        const adversePct = ((maxP - sig.entryPrice) / sig.entryPrice) * 100;
+        const hrsFromEntry = (ts - sig.firedAtMs) / 3_600_000;
+        for (const pct of STOP_SWEEP_PCTS) {
+          const key = `${pct}` as StopSweepKey;
+          if (stopHitH[key] === null && adversePct >= pct)
+            stopHitH[key] = hrsFromEntry;
+        }
+      }
       if (p < minP) minP = p;
       finalP = p;
     }
@@ -1685,6 +1746,7 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
       maxPricePct: maxPct,
       minPricePct: minPct,
       finalPricePct: finalPct,
+      stopHitH: stopHitH as StopHitMap,
       verdict,
     });
   }
@@ -1696,10 +1758,23 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
     let maxP = sig.entryPrice,
       minP = sig.entryPrice,
       finalP = sig.entryPrice;
+    const stopHitH: Partial<StopHitMap> = {};
+    for (const pct of STOP_SWEEP_PCTS)
+      stopHitH[`${pct}` as StopSweepKey] = null;
     for (const ts of allHours.filter((t) => t > sig.firedAtMs && t <= fwdEnd)) {
       const p = priceByHour[ts];
       if (!p) continue;
-      if (p > maxP) maxP = p;
+      if (p > maxP) {
+        maxP = p;
+        // record first hour each stop threshold was crossed (adverse for SHORT)
+        const adversePct = ((maxP - sig.entryPrice) / sig.entryPrice) * 100;
+        const hrsFromEntry = (ts - sig.firedAtMs) / 3_600_000;
+        for (const pct of STOP_SWEEP_PCTS) {
+          const key = `${pct}` as StopSweepKey;
+          if (stopHitH[key] === null && adversePct >= pct)
+            stopHitH[key] = hrsFromEntry;
+        }
+      }
       if (p < minP) minP = p;
       finalP = p;
     }
@@ -1720,6 +1795,7 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
       maxPricePct: maxPct,
       minPricePct: minPct,
       finalPricePct: finalPct,
+      stopHitH: stopHitH as StopHitMap,
       verdict,
     });
   }
@@ -1730,10 +1806,23 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
     let maxP = sig.entryPrice,
       minP = sig.entryPrice,
       finalP = sig.entryPrice;
+    const stopHitH: Partial<StopHitMap> = {};
+    for (const pct of STOP_SWEEP_PCTS)
+      stopHitH[`${pct}` as StopSweepKey] = null;
     for (const ts of allHours.filter((t) => t > sig.firedAtMs && t <= fwdEnd)) {
       const p = priceByHour[ts];
       if (!p) continue;
-      if (p > maxP) maxP = p;
+      if (p > maxP) {
+        maxP = p;
+        // record first hour each stop threshold was crossed (adverse for SHORT)
+        const adversePct = ((maxP - sig.entryPrice) / sig.entryPrice) * 100;
+        const hrsFromEntry = (ts - sig.firedAtMs) / 3_600_000;
+        for (const pct of STOP_SWEEP_PCTS) {
+          const key = `${pct}` as StopSweepKey;
+          if (stopHitH[key] === null && adversePct >= pct)
+            stopHitH[key] = hrsFromEntry;
+        }
+      }
       if (p < minP) minP = p;
       finalP = p;
     }
@@ -1754,6 +1843,7 @@ async function backtestCoin(coin: string, config: Config): Promise<CoinResult> {
       maxPricePct: maxPct,
       minPricePct: minPct,
       finalPricePct: finalPct,
+      stopHitH: stopHitH as StopHitMap,
       verdict,
     });
   }
@@ -2159,6 +2249,10 @@ interface QueuedEntry {
   finalPricePct: number;
   maxPricePct: number;
   minPricePct: number; // peak favorable excursion (price low; negative = good for short)
+  // hours-from-entry at which adverse first crossed each sweep stop width;
+  // null if never crossed. Lets simulate_portfolio.ts release a slot when
+  // the stop fires, not at the full timeout. Keyed by percent: "12","15",...
+  stopHitH: StopHitMap;
   oiDropPct?: number; // BUILDING only: OI drop % at fire (negative = OI rising)
   hadOiData?: boolean; // BUILDING only: OI history available — OI gate evaluable
   trendingAtFire?: boolean; // PUMP_TOP only: coin parabolic when signal fired
@@ -2203,6 +2297,7 @@ function collectQueuedSignals(
       finalPricePct: o.finalPricePct,
       maxPricePct: o.maxPricePct,
       minPricePct: o.minPricePct,
+      stopHitH: o.stopHitH,
       trendingAtFire: sig.trendingAtFire,
     });
   }
@@ -2221,6 +2316,7 @@ function collectQueuedSignals(
       finalPricePct: o.finalPricePct,
       maxPricePct: o.maxPricePct,
       minPricePct: o.minPricePct,
+      stopHitH: o.stopHitH,
       oiDropPct: sig.oiDropPct,
       hadOiData: sig.hadOiData,
     };
@@ -2901,6 +2997,7 @@ function saveJSON(results: CoinResult[], config: Config): void {
               finalPct: Math.round(q.finalPricePct * 100) / 100,
               maxPct: Math.round(q.maxPricePct * 100) / 100,
               minPct: Math.round(q.minPricePct * 100) / 100,
+              stopHitH: q.stopHitH,
               verdict: q.verdict,
               trendingAtFire: q.trendingAtFire ?? false,
               oiDropPct: q.oiDropPct ?? 0,
@@ -3055,7 +3152,7 @@ function parseArgs(): Args {
       .map((c) => c.trim().toUpperCase())
       .filter(Boolean),
     days: parseInt(g("--days", "90"), 10),
-    lookaheadHours: parseInt(g("--lookahead", "48"), 10), // validated: 48h
+    lookaheadHours: parseInt(g("--lookahead", "24"), 10), // validated: 24h (2026-05-28)
     fundingAprThreshold: parseFloat(g("--threshold", "10")), // validated: 10%
     minPositiveReadings: parseInt(g("--min-positive", "2"), 10), // validated: 2
     minOiChangePct: parseFloat(g("--min-oi", "2")), // validated: 2%

@@ -8,36 +8,21 @@ Background, rationale, deviations, and deep architecture detail live in **`HISTO
 
 ## What this project is
 
-A two-process bot for shorting overheated altcoin perpetuals:
+A two-process bot for shorting overheated altcoin perpetuals on **Bybit**:
 
 - **Scanner** (`live_scanner.ts`) — hourly; scans every active Bybit USDT perp, detects
-  signals, sends Telegram alerts, writes tradeable signals to `signal_queue.json`. The
-  scanner is **always Bybit-based** — it detects _signals_ on Bybit regardless of which
-  exchange the executor trades on.
-- **Executor** — every 5 min; reads/clears the queue, places real or paper shorts, manages
-  open positions, sends Telegram updates.
+  signals, sends Telegram alerts, writes tradeable signals to `signal_queue.json`.
+- **Executor** (`bybit_executor.ts`) — every 5 min; reads/clears the queue, places real or
+  paper shorts on Bybit, manages open positions, sends Telegram updates.
 
-They communicate **only** via JSON files (`signal_queue.json`, plus the executor's positions
-file) — no shared memory, no direct calls. PM2 runs them as `altshortbot-scanner` (cron
-`5 * * * *`) and `altshortbot-executor` (cron `*/5 * * * *`); executor ships `--paper` in
-`ecosystem.config.js` _(unverified)_.
-
-### Two executors — Bybit is live, KuCoin is the migration target
-
-- **`bybit_executor.ts`** — the **live** executor. Trades on Bybit USDT perps, positions in
-  `bybit_positions.json`. This is what currently runs.
-- **`kucoin_executor.ts`** — a **migration target, paper-tested only, NOT yet live.** Trades
-  the same Bybit-detected signals on KuCoin USDT perps; positions in `kucoin_positions.json`.
-  Built but not validated against the real KuCoin API — see its section below and `HISTORY.md`.
-
-Both share the scanner, the queue, the `RISK` block, and the two-exit model. They differ only
-in exchange API and sizing. Executor history: Hyperliquid → Bybit → (KuCoin, in progress).
-See `HISTORY.md`.
+They communicate **only** via JSON files (`signal_queue.json`, `bybit_positions.json`) — no
+shared memory, no direct calls. PM2 runs them as `altshortbot-scanner` (cron `5 * * * *`) and
+`altshortbot-executor` (cron `*/5 * * * *`); executor ships `--paper` in `ecosystem.config.js`
+_(unverified)_. The executor previously targeted Hyperliquid — see `HISTORY.md`.
 
 ## Current risk configuration
 
-The `RISK` block — **identical in both `bybit_executor.ts` and `kucoin_executor.ts`.**
-Rationale: `HISTORY.md` → Risk parameter rationale.
+Live `RISK` block in `bybit_executor.ts`. Rationale: `HISTORY.md` → Risk parameter rationale.
 
 ```typescript
 const RISK = {
@@ -45,12 +30,12 @@ const RISK = {
   riskPerTrade: 0.03, // 3% of equity lost on a stop-out (= 1R)
   stopLossPct: 0.15, // 15% stop loss
   maxPositions: 10, // max concurrent open positions
-  timeoutH: 48, // close after 48h regardless
+  timeoutH: 24, // close after 24h regardless (validated 2026-05-28)
 } as const;
 ```
 
 **Exits — only two.** A short closes on **stop** (price rose `stopLossPct` above entry) or
-**timeout** (48h elapsed, closed at live price). There is **no take-profit and no trailing
+**timeout** (24h elapsed, closed at live price). There is **no take-profit and no trailing
 stop** — a winning short rides until it reverses into the stop or times out. Any analysis or
 tooling MUST model this two-exit behaviour.
 
@@ -65,15 +50,10 @@ dollar risk per trade.
 npx tsx live_scanner.ts                           # full Bybit universe
 npx tsx live_scanner.ts --coins ORDI --dry-run    # single coin, no queue write
 
-# Executor — Bybit (live). --paper short-circuits all order code
+# Executor (--paper short-circuits all order code)
 npx tsx bybit_executor.ts --paper                 # simulate
 npx tsx bybit_executor.ts --paper --status        # positions + paper P&L
 npx tsx bybit_executor.ts                         # LIVE — real orders
-
-# Executor — KuCoin (migration target, paper-tested only)
-npx tsx kucoin_executor.ts --paper                # simulate
-npx tsx kucoin_executor.ts --paper --status       # positions + paper P&L
-npx tsx kucoin_executor.ts                        # LIVE — real orders (NOT yet validated)
 
 # Backtest + regression tests
 npx tsx backtest_signals.ts --coin ORDI --days 60 --chart
@@ -89,7 +69,7 @@ npx tsx simulate_portfolio.ts                     # equity curve + max drawdown
 npx tsc --noEmit --target es2022 --module esnext --moduleResolution bundler \
   --strict --skipLibCheck --allowImportingTsExtensions --types node \
   --lib es2022,dom \
-  bybit_executor.ts kucoin_executor.ts shared_types.ts live_scanner.ts scanner_test.ts
+  bybit_executor.ts shared_types.ts live_scanner.ts scanner_test.ts
 ```
 
 PM2 (prod): `pm2 start ecosystem.config.js && pm2 save && pm2 startup` _(unverified)_.
@@ -151,15 +131,12 @@ is settled. Judge any future change on **realized P&L and drawdown**, never win 
 - **Shared types** — `Alert`, `QueuedSignal`, `PositionRecord`, `PositionStore`, `PaperTrade`
   in `shared_types.ts`. Known stale-type gaps noted in `HISTORY.md`.
 
-## Executor mechanics — Bybit (bybit_executor.ts, live)
+## Executor mechanics (bybit_executor.ts)
 
 - **Bybit REST** via `RestClientV5` from `bybit-api`, category `linear`. `BYBIT_TESTNET=1`
   → testnet. `formatPrice(price, tickSize)` formats to the instrument tick size.
 - **`setLeverage` fires before every entry**, clamped to `min(RISK.maxLeverage,
 asset.maxLeverage)`. On failure the order is not placed and a Telegram alert fires.
-- **Order sizing** — `qty` is a **coin quantity**: `notional / entryPrice`.
-- **Stop-loss is attached to the entry order** (`stopLoss` param on `submitOrder`) — one
-  atomic call; the position is never briefly unprotected.
 - **Position management** — stop or timeout only. Live mode detects stop-out by polling
   `fetchLivePositionSize` (0 → exchange closed it); paper compares price to `stopLossPx`.
 - **Paper mode** short-circuits all order helpers (`if (IS_PAPER) return`). SDK signing,
@@ -170,51 +147,13 @@ asset.maxLeverage)`. On failure the order is not placed and a Telegram alert fir
   wrapped to return `[]` on truncated reads. A sub-second append/clear race can lose or
   double-process a signal. Accepted tradeoff.
 
-## Executor mechanics — KuCoin (kucoin_executor.ts, migration target)
-
-**Status: paper-tested only, NOT yet validated against the real KuCoin API.** Mirrors the
-Bybit executor's structure (same `RISK` block, `--paper`/`--status`, two-exit model,
-`alertError`, queue-safety ordering). KuCoin-specific differences:
-
-- **KuCoin REST** via `FuturesClient` from `kucoin-api` (tiagosiebler — same SDK family as
-  `bybit-api`; the official `kucoin-universal-sdk` was considered, see `HISTORY.md`). The SDK
-  returns the full `{ code, data }` envelope; `unwrap()` checks `code === "200000"` and
-  returns `.data`.
-- **Order sizing is in INTEGER CONTRACTS, not coins.** Each contract = `multiplier` coins.
-  `calcSize` converts risk-based notional → `contracts = round(notional / (entry ×
-multiplier))` to a `lotSize` multiple, **floored at 1 lot** (round-up). Realized risk is
-  therefore quantized — it is logged on the position, and the entry alert flags
-  `⚠️ size rounded up` when actual risk exceeds 1.5× the 3% target.
-- **Leverage is passed inline** on `submitOrder` — there is no separate `setLeverage` call.
-- **Stop-loss is a SEPARATE second order**, not attached to the entry. The executor places a
-  market short, then a stop-market close order (`closeOrder: true, stop: 'up'`). **If the
-  entry succeeds but the stop order fails, the position is briefly UNPROTECTED** — the
-  executor sends a loud 🚨 alert, but cannot prevent the gap atomically. This is a real
-  KuCoin limitation, unlike Bybit's attached stop.
-- **Listing filter** — `loadContracts()` calls `getSymbols()` once at startup and caches
-  every contract that is **USDT-margined AND `status: "Open"`**. A signal whose coin is not
-  in that set is skipped and logged. This is the "not listed on KuCoin" handling — some
-  Bybit-listed coins are not on KuCoin.
-- **Symbol mapping** — `toKucoinSymbol()`: `{COIN}USDT` → `{COIN}USDTM`, with `BTC` → `XBT`
-  (KuCoin uses `XBTUSDTM` for Bitcoin).
-- **Verified field accessors** — `getBalance().data.accountEquity` (equity),
-  `getPosition().data.currentQty`/`.isOpen` (stop detection), `getSymbol`/`getSymbols`
-  `.multiplier`/`.lotSize`/`.maxLeverage`/`.tickSize`/`.status`. Confirmed against live API
-  responses.
-- **No testnet wired** — paper-mode-only for v1; KuCoin sandbox support deferred.
-
 ## Environment
 
 Always: `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID`.
-
-Bybit executor (live): `BYBIT_API_KEY`, `BYBIT_API_SECRET`.
+Live executor: `BYBIT_API_KEY`, `BYBIT_API_SECRET`.
 Optional: `BYBIT_TESTNET=1`, `BYBIT_PAPER_ACCOUNT` (default `10000`), `SCANNER_COINS`.
 
-KuCoin executor (migration target): `KUCOIN_API_KEY`, `KUCOIN_API_SECRET`,
-`KUCOIN_API_PASSPHRASE` — note KuCoin needs **three** credentials, not two.
-Optional: `KUCOIN_PAPER_ACCOUNT` (default `10000`).
-
-Use an exchange API key scoped to **derivatives trading only** — no withdrawal permission.
+Use a Bybit API key scoped to **derivatives trading only** — no withdrawal permission.
 Restrict it to the VPS IP where possible. Only that key sits on the VPS.
 
 ## Config sync checklist
@@ -224,8 +163,7 @@ These must agree, or the backtest measures a system you are not running:
 1. **Detection PARAMS** — `live_scanner.ts` `PARAMS` == `backtest_signals.ts` default CLI.
 2. **Queue rules** — scanner `appendToQueue` filter == backtest `collectQueuedSignals`:
    PUMP_TOP + TREND_BREAK + BUILDING(≤-200%) queued; EXHAUSTION suspended; FUNDING never.
-3. **Risk block** — the `RISK` block in **both** `bybit_executor.ts` and
-   `kucoin_executor.ts` == analysis-tool defaults (`stopLossPct 0.15`, `riskPerTrade 0.03`,
-   `maxPositions 10`, `timeoutH 48`). The two executors must not drift apart.
+3. **Risk block** — `bybit_executor.ts` `RISK` == analysis-tool defaults
+   (`stopLossPct 0.15`, `riskPerTrade 0.03`, `maxPositions 10`, `timeoutH 24`).
 
 After any change to detection, queueing, or risk: run `backtest_test.ts` and `scanner_test.ts`.

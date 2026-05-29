@@ -9,50 +9,13 @@ detail. Read this when you need _why_, not _what_.
 - The executor originally targeted **Hyperliquid** (`hl_executor.ts`). It was replaced with
   `bybit_executor.ts` because only ~14% of scanner signals were listed on Hyperliquid — every
   signal is executable on Bybit.
-- `kucoin_executor.ts` is a **third executor**, an in-progress migration target (Bybit →
-  KuCoin). It is built and paper-tested but **not yet validated against the live KuCoin API
-  or deployed** — `bybit_executor.ts` remains the live executor. Design detail below.
 - An `ALTSHORTBOT_COMPLETE_PLAN.md` was the original 11-stage spec. It has been **removed**.
   The "Design deviations" table below is the surviving record of why the implementation
   differs from that plan.
 
-## KuCoin executor — design notes
-
-`kucoin_executor.ts` mirrors `bybit_executor.ts` section-for-section (same `RISK` block,
-`--paper`/`--status`, two-exit model, `alertError`→Telegram, queue-safety ordering). The
-KuCoin-specific decisions:
-
-- **SDK: `kucoin-api` (tiagosiebler), not the official `kucoin-universal-sdk`.** Three SDKs
-  exist: the old `kucoin-futures-node-sdk` (officially deprecated); `kucoin-universal-sdk`
-  (KuCoin's current official SDK — first-party, but a verbose builder-pattern API); and
-  `kucoin-api` (third-party, actively maintained, by the same author as `bybit-api`). Chose
-  `kucoin-api` because the codebase already uses `bybit-api` — same idiom (flat client,
-  `client.submitOrder({...})`), so the port from `bybit_executor.ts` is near-mechanical. The
-  cost is a third-party dependency; the official SDK is a defensible alternative if
-  first-party tracking is later preferred.
-- **Sizing in integer contracts.** KuCoin futures `size` is a contract count, not a coin
-  quantity — each contract = `multiplier` coins. `calcSize` converts the risk-based notional
-  to `contracts = round(notional / (entry × multiplier))`, snapped to a `lotSize` multiple.
-- **Round-up policy.** A positive fraction below one lot rounds **up** to 1 lot (never skips
-  for size). Consequence: round-up only ever _increases_ risk — a trade on an expensive
-  contract can come in above the 3% target. The executor stores the _actual_ notional and
-  risk fraction on the position, and the entry alert flags `⚠️ size rounded up` when realized
-  risk exceeds 1.5× target. This was a deliberate choice over skip-on-zero.
-- **Two-order stop — a real limitation.** Bybit attaches the stop to the entry order
-  atomically. KuCoin requires a separate stop-market close order after the entry. If the
-  entry fills but the stop order fails, the position is briefly unprotected; the executor
-  fires a loud 🚨 alert but cannot close the gap atomically.
-- **Listing filter.** `getSymbols()` at startup caches every contract that is USDT-margined
-  _and_ `status: "Open"` (a contract can be listed but Paused/BeingSettled). Signals for
-  coins absent from that set are skipped — this is the "not listed on KuCoin" handling, since
-  some Bybit-listed coins have no KuCoin USDT perpetual.
-- **Paper-mode-only for v1.** KuCoin has a futures sandbox, but testnet support in
-  `kucoin-api` was not verified — deferred. As with every executor, the first live run is the
-  first real test of SDK signing and order round-trips.
-
 ## Risk parameter rationale
 
-The live `RISK` block (`riskPerTrade 3%`, `maxPositions 10`, `stopLossPct 15%`, `timeoutH 48`)
+The live `RISK` block (`riskPerTrade 3%`, `maxPositions 10`, `stopLossPct 15%`, `timeoutH 24`)
 was set from `run_universe_backtest.ts` (584 coins, 60-day window, 440 queued signals, ~73%
 queued win rate) and `simulate_portfolio.ts` (equity curve + max drawdown).
 
@@ -65,10 +28,19 @@ queued win rate) and `simulate_portfolio.ts` (equity curve + max drawdown).
 - **`stopLossPct 15%`** — with no take-profit, a wide stop captures no extra upside, it only
   absorbs more loss. The stop-width sweep showed 20%→15% nearly doubles modelled return for
   ~1.6pt more drawdown; 15%→12% is the cliff (drawdown jumps to ~-31%). 15% is the sweet spot.
+- **`timeoutH 24`** — the timeout sweep (2026-05-28) tested 12h/24h/48h/72h on the live
+  config. Result was an inverted-V centred on 24h: return +997% vs 48h's +935% and 72h's
+  +868%, with drawdown roughly halved (-11.1% vs -24.5% vs -21.4%). 12h collapsed to +239%
+  with -21.9% drawdown — the floor where winners are cut before the reversal completes. The
+  mechanism: longer hold = more time for price to drift into the 15% stop _and_ more
+  give-back past the peak (the give-back analysis showed 48h winners had already given back
+  ~3pts on average). 24h catches winners closer to peak, with fewer accidental stop-outs.
+  This was the FIRST signal/exit-layer optimization this session that improved the system
+  net; six prior experiments were rejected. Validated and applied.
 
-All three numbers are from **one** 60-day window — the modelled ~-24% drawdown is a floor on
-bad, not a worst case. A worse correlated cluster (many squeeze shorts hit by one broad alt
-selloff) goes deeper. Budget for -30%+ actually occurring.
+All four numbers are from **one** 60-day window — the modelled ~-11% drawdown at 24h is a
+floor on bad, not a worst case. A worse correlated cluster (many squeeze shorts hit by one
+broad alt selloff) goes deeper.
 
 ## EXHAUSTION suspension — full rationale
 
@@ -154,21 +126,13 @@ by `backtest_test.ts` and `scanner_test.ts` for deterministic tests. Refresh wit
 `/open-interest` endpoint caps at ~200 records (~8 days) — OI-gated signals cannot fire for
 events older than that window in the backtest.
 
-### shared_types.ts — resolved type fixes
+### Known type gaps (shared_types.ts)
 
-Two type gaps were fixed (previously the executors papered over them with casts):
-
-- `PositionRecord.signalType` now includes `"PUMP_TOP"` —
-  `"PUMP_TOP" | "BUILDING" | "EXHAUSTION" | "TREND_BREAK"`. PUMP*TOP became tradeable when it
-  started queueing; the union had not been widened. Executors still cast `sig.type` to this,
-  but it is now a \_safe narrowing* (5-member `Alert["type"]` minus the never-queued FUNDING),
-  not an unsound widening.
-- `PaperTrade.closeReason` trimmed to `"stop" | "timeout" | "manual"` — the dead `"target"`
-  and `"trailing"` values were removed (no take-profit, no trailing stop in either executor).
-
-Note: the executor position-store wrappers (`BybitPositionStore`, `KucoinPositionStore`) are
-each defined **locally** in their own executor file, not in `shared_types.ts` — they are
-structurally identical but kept local for consistency between the two executors.
+`PositionRecord.signalType` is typed `"EXHAUSTION" | "TREND_BREAK" | "BUILDING"` but
+`PUMP_TOP` is now tradeable — the executor force-casts via `signalType as
+PositionRecord["signalType"]`. `closeReason` still includes `"target"` and `"trailing"`,
+which the current executor never produces (no TP, no trailing stop). Harmless at runtime;
+worth tightening if `shared_types.ts` is next edited.
 
 ## Design deviations (vs the removed ALTSHORTBOT_COMPLETE_PLAN.md)
 
@@ -186,3 +150,4 @@ structurally identical but kept local for consistency between the two executors.
 | Error handling       | `console.error` only                  | `alertError()` → stderr + Telegram for high-stakes paths        | Silent failures during live operation were unobservable                         |
 | Stop loss            | 12% (early)                           | 15%                                                             | No-TP exit model: stop-width sweep showed 15% optimal                           |
 | Risk / concurrency   | not specified at current values       | `riskPerTrade 3%`, `maxPositions 10`                            | Set from portfolio simulation — return-vs-drawdown balance                      |
+| Timeout              | 48h (early)                           | 24h                                                             | 2026-05-28 sweep: 12h/24h/48h/72h inverted-V; 24h ~halves drawdown vs 48h       |

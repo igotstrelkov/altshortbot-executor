@@ -2,7 +2,7 @@
  * AltShortBot KuCoin Executor
  * ===========================
  * Runs every 5 minutes via PM2 cron. Reads signal_queue.json, opens shorts
- * on KuCoin USDT perpetuals, manages open positions (stop loss, 48h timeout).
+ * on KuCoin USDT perpetuals, manages open positions (stop loss, 24h timeout).
  *
  * Why KuCoin:
  *   Migration target after Bybit. The scanner detects squeezes on Bybit USDT
@@ -21,7 +21,7 @@
  *
  * Exit model — identical to the Bybit executor: a short closes ONLY on
  *   - stop    — price rose stopLossPct above entry, or
- *   - timeout — 48h elapsed.
+ *   - timeout — 24h elapsed.
  * No take-profit, no trailing stop. On exit, any untriggered stop order left
  * resting on the symbol is cancelled — critical on a timeout close, where
  * openShort's stop never fired and would otherwise survive to trigger against
@@ -68,7 +68,7 @@ const RISK = {
   riskPerTrade: 0.06, // 6% account risk per trade
   stopLossPct: 0.15, // 15% stop loss
   maxPositions: 10, // max concurrent open positions
-  timeoutH: 48, // close after 48h regardless
+  timeoutH: 24, // close after 24h regardless (validated 2026-05-28: 24h optimal vs 48h/72h)
 } as const;
 
 // If integer-contract rounding pushes realized risk above this multiple of
