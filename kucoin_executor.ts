@@ -764,6 +764,7 @@ async function executeSignal(
     stopLossPx: stopPx,
     fundingApr: sig.fundingApr,
     notionalUsdc: size.notionalUsdt,
+    leverage,
     isPaper: IS_PAPER,
   });
 
