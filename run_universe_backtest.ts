@@ -21,7 +21,10 @@ import { existsSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 
 const BB_BASE = "https://api.bybit.com";
 const MIN_PRICE_USDC = 0.001;
-const EXCLUDE = new Set(["BTC", "ETH", "BNB", "BTCDOM", "EDEN", "FIDA"]);
+// FIDA excluded: extreme-funding BUILDINGs are mega-squeeze traps (net loser on
+// the backtest). EDEN removed 2026-06-07 — backtested as a clean earner. Must
+// stay in sync with live_scanner.ts EXCLUDE_COINS.
+const EXCLUDE = new Set(["BTC", "ETH", "BNB", "BTCDOM", "FIDA"]);
 
 const argDays = process.argv[process.argv.indexOf("--days") + 1];
 const DAYS = process.argv.includes("--days") ? parseInt(argDays) : 60;
@@ -34,7 +37,7 @@ const BATCH = process.argv.includes("--batch") ? parseInt(argBatch) : 25;
 // file so a normal run is never overwritten — diff the two.
 const NO_TREND = process.argv.includes("--no-trend-filter");
 
-// --building-min-funding <N>: overrides the validated -200% BUILDING queue
+// --building-min-funding <N>: overrides the validated -180% BUILDING queue
 // gate (Strategy B). Lowering it (e.g. to 0) pulls weaker-funding BUILDING
 // signals into the queued set — an UNVALIDATED population. Routes to its own
 // result file so the validated baseline is never clobbered.
@@ -89,9 +92,9 @@ const PARAMS = [
   // Outcome window — validated value is 24h; --lookahead overrides.
   "--lookahead",
   LOOKAHEAD ?? "24",
-  // BUILDING queue gate — validated value is -200; --building-min-funding overrides.
+  // BUILDING queue gate — validated value is -180; --building-min-funding overrides.
   "--building-min-funding",
-  BUILDING_MIN_FUNDING ?? "-200",
+  BUILDING_MIN_FUNDING ?? "-180",
 ];
 
 interface QueuedDetail {
@@ -187,7 +190,7 @@ async function main() {
       NO_TREND ? "OFF (--no-trend-filter — TREND_BREAK disabled)" : "ON"
     }${
       BUILDING_MIN_FUNDING !== null
-        ? `  |  building-min-funding: ${BUILDING_MIN_FUNDING}% (OVERRIDE — validated is -200)`
+        ? `  |  building-min-funding: ${BUILDING_MIN_FUNDING}% (OVERRIDE — validated is -180)`
         : ""
     }${
       LOOKAHEAD !== null
@@ -256,7 +259,7 @@ async function main() {
   console.log(
     `  TOTAL: ${totW}/${totQ} queued signals won` +
       (totQ ? ` — ${((totW / totQ) * 100).toFixed(1)}% win rate` : "") +
-      `\n  Blocked BUILDING (funding > -200%): ${totBlocked}`,
+      `\n  Blocked BUILDING (funding > ${BUILDING_MIN_FUNDING ?? "-180"}%): ${totBlocked}`,
   );
 
   console.log("\n  By signal type:");

@@ -40,8 +40,12 @@ import type { Alert, QueuedSignal } from "./shared_types.ts";
 // to validate and tune the algorithm. Those same parameters now apply universally.
 // New listings are picked up automatically; delisted coins drop off cleanly.
 
-// Skip these regardless (index tokens, large caps that almost never fire)
-const EXCLUDE_COINS = new Set(["BTC", "ETH", "BNB", "BTCDOM", "EDEN", "FIDA"]);
+// Skip these regardless: index tokens / large caps that almost never fire, plus
+// FIDA — its extreme-funding BUILDINGs are mega-squeeze traps (funding to
+// ~-21900% APR with +30-42% adverse runs; net loser on the universe backtest).
+// EDEN was removed from this list 2026-06-07: it backtested as a clean earner
+// (+5.2% equity over 60d, 6W/1L) and had no documented reason to be excluded.
+const EXCLUDE_COINS = new Set(["BTC", "ETH", "BNB", "BTCDOM", "FIDA"]);
 
 // Sub-penny tokens have squeeze cycles longer than the 10h detection window
 // and produce unreliable exhaustion signals. Filter them out at discovery.
@@ -98,7 +102,12 @@ const FUNDING_COOLDOWN_MS = 8 * HOUR; // Gate 1 re-fires once per settlement cyc
 // Re-fire BUILDING when funding becomes 2× more extreme than when it first fired.
 // E.g.: first fire at -300% APR → re-fire when funding reaches -600% APR.
 const BUILDING_REFIRE_MULTIPLIER = 2.0;
-const MIN_FUNDING_APR = -200;
+// BUILDING auto-traded when funding ≤ this. Loosened -200 → -180 on 2026-06-07:
+// the -180..-200 band backtested as the highest-win-rate marginal slice (82%
+// win, +0.28R) and beat -200 on return in both halves of a 120d out-of-sample
+// split with matched drawdown. Looser floors (-150/-120) added drawdown without
+// robust return gain — rejected. See CLAUDE.md "Validated signal parameters".
+const MIN_FUNDING_APR = -180;
 const MIN_EXHAUSTION_GAP_H = 6; // Exhaustion re-fire minimum gap (hours)
 const STATE_FILE = "scanner_state.json";
 const BB_BASE = "https://api.bybit.com";
@@ -789,56 +798,18 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN ?? "";
 const TELEGRAM_GROUP_ID = process.env.TELEGRAM_GROUP_ID ?? "";
 const DRY_RUN = process.argv.includes("--dry-run");
 
+// Stop loss mirrors the executor RISK block (stopLossPct 0.15): a short stops
+// out when price rises 15% above entry. Kept as a local constant because the
+// scanner does not import the executor's RISK — keep the two in sync.
+const STOP_LOSS_PCT = 0.15;
+
 function formatAlert(alert: Alert): string {
-  const icons: Record<string, string> = {
-    FUNDING: "💰",
-    PUMP_TOP: "🚀",
-    BUILDING: "⚠️",
-    EXHAUSTION: "🎯",
-    TREND_BREAK: "🚨",
-  };
-  const confIcons: Record<string, string> = {
-    HIGH: "🟢",
-    MEDIUM: "🟡",
-    LOW: "🔴",
-  };
-
-  const lines = [
-    `${icons[alert.type] ?? "📡"} *ALTSHORTBOT — ${alert.coin}*`,
-    `Signal: *${alert.type.replace("_", " ")}*`,
+  const stopLoss = alert.entry * (1 + STOP_LOSS_PCT);
+  return [
+    `🔻 ${alert.coin}*`,
     `Entry: $${alert.entry.toFixed(4)}`,
-    `Funding: ${alert.fundingApr.toFixed(1)}% APR`,
-    `Confidence: ${confIcons[alert.confidence]} ${alert.confidence}`,
-    "",
-    alert.details,
-  ];
-
-  if (alert.type === "EXHAUSTION" || alert.type === "TREND_BREAK") {
-    if (alert.msSinceBuilding !== null) {
-      const h = Math.round(alert.msSinceBuilding / HOUR);
-      lines.push(`Building: ✅ ${h}h ago`);
-      if (h < 4) lines.push(`⚠️ Recent building — squeeze may continue`);
-    } else {
-      lines.push(`Building: ⚠️ No prior building — lower confidence`);
-    }
-  }
-
-  if (alert.type === "EXHAUSTION" && alert.confidence === "HIGH")
-    lines.push("", `📐 Short entry — stop at -12% | target -15% to -40%`);
-  if (alert.type === "BUILDING") {
-    // BUILDING is auto-traded when funding ≤ -200% APR (validated profitable
-    // regime: 9/9 winners). Above that threshold it's informational only —
-    // mega-squeezes have run another 80%+ before reversing.
-    if (alert.fundingApr <= MIN_FUNDING_APR) {
-      lines.push("", `📐 Short entry — extreme funding squeeze (auto-queued)`);
-    } else {
-      lines.push("", `⏳ Do NOT short yet — await exhaustion signal`);
-    }
-  }
-  if (alert.type === "TREND_BREAK")
-    lines.push("", `📐 Strong short — parabolic blow-off confirmed`);
-
-  return lines.join("\n");
+    `Stop loss: $${stopLoss.toFixed(4)}`,
+  ].join("\n");
 }
 
 async function sendTelegram(message: string): Promise<void> {
@@ -947,10 +918,11 @@ async function main(): Promise<void> {
     // Queue tradeable signals for the executor.
     //   • PUMP_TOP — validated tradeable signal (universe backtest: 76% win).
     //   • TREND_BREAK (HIGH/MEDIUM) — parabolic blow-off short.
-    //   • BUILDING with fundingApr ≤ -200% APR — validated profitable: 9/9
-    //     paper-observed winners over 10d (avg +11% at 1×, ~+33% at 3×).
-    //     Above -200% (e.g. -100%) entered mega-squeezes where price ran
-    //     80%+ higher before reversing, so they're excluded.
+    //   • BUILDING with fundingApr ≤ -180% APR (MIN_FUNDING_APR) — validated
+    //     profitable. Floor loosened -200 → -180 on 2026-06-07: the -180..-200
+    //     band was the highest-win-rate marginal slice (82% win) and beat -200
+    //     on return in a 120d out-of-sample split with matched drawdown. Looser
+    //     floors (-150/-120) added drawdown without robust gain — rejected.
     //   • EXHAUSTION — queueing SUSPENDED. Universe backtest showed negative
     //     realized P&L (-20% to -4%/trade, 86% stopped) — the detector fires
     //     while squeezes are still accelerating. Telegram alerts still fire

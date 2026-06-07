@@ -85,7 +85,7 @@ coin set and confirming win rates hold.
 --pump-pct 19 --pump-vol 5 --pump-rsi 88 --pump-funding 0
 --squeeze-pct 20 --squeeze-hours 10 --squeeze-funding -100 --squeeze-oi-drop 0
 --exhaust-funding -20 --exhaust-oi-drop 3 --lookahead 48
---building-min-funding -200
+--building-min-funding -180
 ```
 
 ## Signal types and what gets queued
@@ -97,7 +97,7 @@ Five types fire from `scanCoin()`. The executor only trades the subset written t
 | ------------- | --------------- | ---------------------------- | ---------------------------------------------- |
 | `FUNDING`     | ❌ console only | ❌ never                     | Gate 1 passes (broad-market noise)             |
 | `PUMP_TOP`    | ✅              | ✅ always                    | Large candle + volume + RSI + positive funding |
-| `BUILDING`    | ✅              | ✅ if `fundingApr ≤ -200%`   | Squeeze active, funding extreme                |
+| `BUILDING`    | ✅              | ✅ if `fundingApr ≤ -180%`   | Squeeze active, funding extreme                |
 | `EXHAUSTION`  | ✅              | ⛔ **SUSPENDED**             | Squeeze ending                                 |
 | `TREND_BREAK` | ✅              | ✅ always (always HIGH conf) | Blow-off top during uptrend                    |
 
@@ -106,9 +106,14 @@ the only signal type with negative realized P&L. Controlled by `EXHAUSTION_QUEUE
 false` in `backtest_signals.ts` and the scanner's queue filter. Reversible — re-enable after
 the detector is fixed. Full rationale in `HISTORY.md`.
 
-The `-200%` BUILDING threshold (Strategy B) is a floor, not a band — funding-band analysis
-showed no win-rate degradation at more extreme funding. FUNDING is console-only to avoid
-flooding Telegram (300+/scan in broad regimes); it never affects positions.
+The `-180%` BUILDING threshold (Strategy B) is a floor, not a band — funding-band analysis
+showed no win-rate degradation at more extreme funding. It was loosened from `-200%` to
+`-180%` on 2026-06-07: the `-180..-200` band was the highest-win-rate marginal slice (82%
+win, +0.28R) and beat `-200` on return in BOTH halves of a 120d out-of-sample split with
+matched drawdown. Looser floors (`-150`/`-120`) raised return in-sample but added drawdown
+without robust out-of-sample gain — tested and rejected; do not loosen below `-180` without
+re-validating. FUNDING is console-only to avoid flooding Telegram (300+/scan in broad
+regimes); it never affects positions.
 
 ## Do not re-investigate these
 
@@ -162,7 +167,7 @@ These must agree, or the backtest measures a system you are not running:
 
 1. **Detection PARAMS** — `live_scanner.ts` `PARAMS` == `backtest_signals.ts` default CLI.
 2. **Queue rules** — scanner `appendToQueue` filter == backtest `collectQueuedSignals`:
-   PUMP_TOP + TREND_BREAK + BUILDING(≤-200%) queued; EXHAUSTION suspended; FUNDING never.
+   PUMP_TOP + TREND_BREAK + BUILDING(≤-180%) queued; EXHAUSTION suspended; FUNDING never.
 3. **Risk block** — `bybit_executor.ts` `RISK` == analysis-tool defaults
    (`stopLossPct 0.15`, `riskPerTrade 0.03`, `maxPositions 10`, `timeoutH 24`).
 
