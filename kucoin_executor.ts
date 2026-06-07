@@ -43,7 +43,7 @@
  *   npx tsx kucoin_executor.ts            ← LIVE — real orders
  */
 
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { FuturesClient } from "kucoin-api";
 import { fileURLToPath } from "url";
 import type {
@@ -61,6 +61,10 @@ const KUCOIN_API_KEY = process.env.KUCOIN_API_KEY ?? "";
 const KUCOIN_API_SECRET = process.env.KUCOIN_API_SECRET ?? "";
 const KUCOIN_API_PASSPHRASE = process.env.KUCOIN_API_PASSPHRASE ?? "";
 const PAPER_ACCOUNT = parseFloat(process.env.KUCOIN_PAPER_ACCOUNT ?? "10000");
+
+const CONVEX_INGEST_URL = process.env.CONVEX_INGEST_URL ?? "";
+const CONVEX_INGEST_SECRET = process.env.CONVEX_INGEST_SECRET ?? "";
+const CONVEX_OUTBOX_FILE = "convex_outbox.json";
 
 // Risk block — identical values to bybit_executor.ts. See CLAUDE.md.
 const RISK = {
@@ -145,6 +149,90 @@ async function alertError(ctx: string, err: unknown): Promise<void> {
   const msg = describeError(err);
   console.error(`[ERROR] ${ctx}: ${msg}`);
   await sendTelegram(`🚨 *altshortbot* — ${ctx}\n\`${msg}\``);
+}
+
+// ─── Convex reporting (non-fatal, one-way) ──────────────────────────────────────
+// After each open and each close, POST a "this just happened" event to a Convex
+// HTTP ingest endpoint. STRICTLY NON-FATAL: a network failure, bad URL, timeout,
+// or non-2xx response never throws into the trading path — it is swallowed here
+// and the event is appended to a local outbox for retry on the next run. The bot
+// stays fully decoupled from Convex: it knows only a URL and a secret.
+
+async function postSignalEvent(
+  event: "opened" | "closed",
+  signal: Record<string, unknown>,
+): Promise<void> {
+  if (!CONVEX_INGEST_URL || !CONVEX_INGEST_SECRET) return; // not configured → no-op
+  try {
+    const res = await fetch(CONVEX_INGEST_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-ingest-secret": CONVEX_INGEST_SECRET,
+      },
+      body: JSON.stringify({ event, signal }),
+    });
+    if (!res.ok) throw new Error(`ingest ${res.status}`);
+  } catch (e) {
+    console.error("[convex] post failed, queued for retry:", (e as Error).message);
+    appendToOutbox({ event, signal }); // never rethrow
+  }
+}
+
+/**
+ * Append a failed event to the local outbox. Temp-file + rename keeps the write
+ * atomic so a crash mid-write cannot corrupt the outbox.
+ */
+function appendToOutbox(entry: {
+  event: string;
+  signal: Record<string, unknown>;
+}): void {
+  let queue: any[] = [];
+  try {
+    if (existsSync(CONVEX_OUTBOX_FILE))
+      queue = JSON.parse(readFileSync(CONVEX_OUTBOX_FILE, "utf8"));
+  } catch {
+    queue = [];
+  }
+  queue.push({ ...entry, ts: Date.now() });
+  const tmp = `${CONVEX_OUTBOX_FILE}.tmp.${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(queue), "utf8");
+  renameSync(tmp, CONVEX_OUTBOX_FILE);
+}
+
+/**
+ * Replay pending events oldest-first so an "opened" always precedes its
+ * "closed". Stop on the first failure and keep the remainder for the next run.
+ */
+async function flushOutbox(): Promise<void> {
+  if (!CONVEX_INGEST_URL || !CONVEX_INGEST_SECRET || !existsSync(CONVEX_OUTBOX_FILE))
+    return;
+  let queue: any[] = [];
+  try {
+    queue = JSON.parse(readFileSync(CONVEX_OUTBOX_FILE, "utf8"));
+  } catch {
+    return;
+  }
+  const remaining = [...queue];
+  for (const item of queue) {
+    try {
+      const res = await fetch(CONVEX_INGEST_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-ingest-secret": CONVEX_INGEST_SECRET,
+        },
+        body: JSON.stringify({ event: item.event, signal: item.signal }),
+      });
+      if (!res.ok) break; // stop; preserve order for next run
+      remaining.shift();
+    } catch {
+      break;
+    }
+  }
+  const tmp = `${CONVEX_OUTBOX_FILE}.tmp.${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(remaining), "utf8");
+  renameSync(tmp, CONVEX_OUTBOX_FILE);
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -573,6 +661,16 @@ async function managePositions(store: KucoinPositionStore): Promise<void> {
       if (IS_PAPER) store.paperEquityUsdt += finalPnlUsdt;
       delete store.open[coin];
 
+      await postSignalEvent("closed", {
+        coin,
+        openedAt: pos.openedAt,
+        closedAt: nowMs,
+        exitPx: closePx,
+        pnlUsdc: finalPnlUsdt,
+        pnlPct: finalPnlPct,
+        closeReason,
+      });
+
       const icon = finalPnlPct > 0 ? "✅" : "❌";
       const mode = IS_PAPER ? "📄 " : "";
       await sendTelegram(
@@ -649,6 +747,19 @@ async function executeSignal(
   };
   store.open[coin] = record;
 
+  await postSignalEvent("opened", {
+    coin,
+    signalType,
+    confidence,
+    firedAt: sig.firedAt,
+    openedAt: record.openedAt,
+    entryPx: entry,
+    stopLossPx: stopPx,
+    fundingApr: sig.fundingApr,
+    notionalUsdc: size.notionalUsdt,
+    isPaper: IS_PAPER,
+  });
+
   // Round-up can push realized risk above target — flag it (informational).
   const riskNote =
     size.actualRiskFrac > RISK.riskPerTrade * RISK_NOTE_MULTIPLE
@@ -723,6 +834,9 @@ async function main(): Promise<void> {
     await printStatus(store);
     return;
   }
+
+  // Retry any Convex events that failed on a previous run (non-fatal, FIFO).
+  await flushOutbox();
 
   // ── Manage existing positions ───────────────────────────────────────────────
   if (Object.keys(store.open).length > 0) {

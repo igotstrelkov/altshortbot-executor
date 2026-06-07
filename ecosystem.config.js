@@ -79,6 +79,9 @@ module.exports = {
         KUCOIN_API_SECRET: process.env.KUCOIN_API_SECRET ?? "",
         KUCOIN_API_PASSPHRASE: process.env.KUCOIN_API_PASSPHRASE ?? "",
         KUCOIN_PAPER_ACCOUNT: "10000", // simulated account size for paper mode
+        // Convex reporting hook (optional — unset = no-op; see kucoin_executor.ts).
+        CONVEX_INGEST_URL: process.env.CONVEX_INGEST_URL ?? "",
+        CONVEX_INGEST_SECRET: process.env.CONVEX_INGEST_SECRET ?? "",
       },
     },
   ],
