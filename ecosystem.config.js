@@ -7,7 +7,7 @@
 // Setup:
 //   npm install -g pm2
 //   export TELEGRAM_TOKEN="..."
-//   export TELEGRAM_CHAT_ID="..."
+//   export TELEGRAM_GROUP_ID="..."
 //   export HL_WALLET_ADDRESS="0x..."   # main wallet (only for live mode)
 //   export HL_AGENT_KEY="0x..."        # agent wallet private key (only for live mode)
 //   pm2 start ecosystem.config.js
@@ -50,7 +50,7 @@ module.exports = {
       env: {
         NODE_ENV: "production",
         TELEGRAM_TOKEN: process.env.TELEGRAM_TOKEN ?? "",
-        TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID ?? "",
+        TELEGRAM_GROUP_ID: process.env.TELEGRAM_GROUP_ID ?? "",
         // Optional: override watchlist (comma-separated)
         // SCANNER_COINS: "ORDI,KNC,HIVE,HYPER,ENJ",
       },
@@ -74,7 +74,7 @@ module.exports = {
       env: {
         NODE_ENV: "production",
         TELEGRAM_TOKEN: process.env.TELEGRAM_TOKEN ?? "",
-        TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID ?? "",
+        TELEGRAM_GROUP_ID: process.env.TELEGRAM_GROUP_ID ?? "",
         KUCOIN_API_KEY: process.env.KUCOIN_API_KEY ?? "",
         KUCOIN_API_SECRET: process.env.KUCOIN_API_SECRET ?? "",
         KUCOIN_API_PASSPHRASE: process.env.KUCOIN_API_PASSPHRASE ?? "",

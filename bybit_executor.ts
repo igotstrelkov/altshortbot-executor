@@ -65,10 +65,10 @@ const client = new RestClientV5({
 
 // ─── Telegram ─────────────────────────────────────────────────────────────────
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN ?? "";
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID ?? "";
+const TELEGRAM_GROUP_ID = process.env.TELEGRAM_GROUP_ID ?? "";
 
 async function sendTelegram(msg: string): Promise<void> {
-  if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
+  if (!TELEGRAM_TOKEN || !TELEGRAM_GROUP_ID) {
     console.log("[telegram]", msg);
     return;
   }
@@ -77,7 +77,7 @@ async function sendTelegram(msg: string): Promise<void> {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        chat_id: TELEGRAM_CHAT_ID,
+        chat_id: TELEGRAM_GROUP_ID,
         text: msg,
         parse_mode: "Markdown",
       }),

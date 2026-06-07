@@ -149,7 +149,7 @@ asset.maxLeverage)`. On failure the order is not placed and a Telegram alert fir
 
 ## Environment
 
-Always: `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID`.
+Always: `TELEGRAM_TOKEN`, `TELEGRAM_GROUP_ID`.
 Live executor: `BYBIT_API_KEY`, `BYBIT_API_SECRET`.
 Optional: `BYBIT_TESTNET=1`, `BYBIT_PAPER_ACCOUNT` (default `10000`), `SCANNER_COINS`.
 
