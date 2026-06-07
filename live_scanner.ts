@@ -18,7 +18,7 @@ import type { Alert, QueuedSignal } from "./shared_types.ts";
  *   2. Get chat ID: curl https://api.telegram.org/bot<TOKEN>/getUpdates
  *   3. Set env vars:
  *      export TELEGRAM_TOKEN="123456:ABC-DEF..."
- *      export TELEGRAM_CHAT_ID="-1001234567890"
+ *      export TELEGRAM_GROUP_ID="-1001234567890"
  *
  * Run once (add to cron: 5 * * * * npx tsx live_scanner.ts >> logs/scanner.log 2>&1):
  *   npx tsx live_scanner.ts
@@ -786,7 +786,7 @@ function scanCoin(
 
 // ─── Telegram ─────────────────────────────────────────────────────────────────
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN ?? "";
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID ?? "";
+const TELEGRAM_GROUP_ID = process.env.TELEGRAM_GROUP_ID ?? "";
 const DRY_RUN = process.argv.includes("--dry-run");
 
 function formatAlert(alert: Alert): string {
@@ -842,7 +842,7 @@ function formatAlert(alert: Alert): string {
 }
 
 async function sendTelegram(message: string): Promise<void> {
-  if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
+  if (!TELEGRAM_TOKEN || !TELEGRAM_GROUP_ID) {
     console.log("\n[no telegram creds]\n" + message + "\n");
     return;
   }
@@ -853,7 +853,7 @@ async function sendTelegram(message: string): Promise<void> {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          chat_id: TELEGRAM_CHAT_ID,
+          chat_id: TELEGRAM_GROUP_ID,
           text: message,
           parse_mode: "Markdown",
         }),

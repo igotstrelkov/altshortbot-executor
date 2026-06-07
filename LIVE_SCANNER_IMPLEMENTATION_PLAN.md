@@ -35,7 +35,7 @@ backtest_signals.ts      — reference implementation (do not modify)
 ### Files to create
 
 1. `live_scanner.ts` — the complete scanner (all logic in one file)
-2. `.env.example` — template for TELEGRAM_TOKEN and TELEGRAM_CHAT_ID
+2. `.env.example` — template for TELEGRAM_TOKEN and TELEGRAM_GROUP_ID
 3. `scanner_state.json` — auto-created on first run
 
 ### Runtime
@@ -1190,7 +1190,7 @@ function checkGate2(
 
 ```typescript
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN ?? "";
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID ?? "";
+const TELEGRAM_GROUP_ID = process.env.TELEGRAM_GROUP_ID ?? "";
 const DRY_RUN = process.argv.includes("--dry-run");
 ```
 
@@ -1263,7 +1263,7 @@ function formatAlert(alert: Alert): string {
 
 ```typescript
 async function sendTelegram(message: string): Promise<void> {
-  if (DRY_RUN || !TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
+  if (DRY_RUN || !TELEGRAM_TOKEN || !TELEGRAM_GROUP_ID) {
     console.log("\n[DRY RUN] Telegram message:\n" + message + "\n");
     return;
   }
@@ -1273,7 +1273,7 @@ async function sendTelegram(message: string): Promise<void> {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        chat_id: TELEGRAM_CHAT_ID,
+        chat_id: TELEGRAM_GROUP_ID,
         text: message,
         parse_mode: "Markdown",
       }),
@@ -1439,7 +1439,7 @@ module.exports = {
       env: {
         NODE_ENV: "production",
         TELEGRAM_TOKEN: process.env.TELEGRAM_TOKEN ?? "",
-        TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID ?? "",
+        TELEGRAM_GROUP_ID: process.env.TELEGRAM_GROUP_ID ?? "",
         // SCANNER_COINS: "ORDI,KNC,HIVE,HYPER,ENJ",  // optional override
       },
     },
@@ -1454,7 +1454,7 @@ npm install -g pm2
 mkdir -p logs
 
 export TELEGRAM_TOKEN="your-token"
-export TELEGRAM_CHAT_ID="your-chat-id"
+export TELEGRAM_GROUP_ID="your-chat-id"
 
 pm2 start ecosystem.config.js
 pm2 save       # persist process list across reboots
@@ -1507,7 +1507,7 @@ cat scanner_state.json
 ### Verify Telegram works
 
 ```bash
-TELEGRAM_TOKEN=xxx TELEGRAM_CHAT_ID=yyy npx tsx live_scanner.ts --coins HYPER
+TELEGRAM_TOKEN=xxx TELEGRAM_GROUP_ID=yyy npx tsx live_scanner.ts --coins HYPER
 ```
 
 ---
@@ -1574,7 +1574,7 @@ TELEGRAM_TOKEN=xxx TELEGRAM_CHAT_ID=yyy npx tsx live_scanner.ts --coins HYPER
 # curl https://api.telegram.org/bot{TOKEN}/getUpdates
 
 TELEGRAM_TOKEN=123456789:ABCDEFghijklmnop-qrstuvwxyz123456789
-TELEGRAM_CHAT_ID=-1001234567890
+TELEGRAM_GROUP_ID=-1001234567890
 
 # Optional: override watchlist (comma-separated)
 # SCANNER_COINS=ORDI,KNC,HIVE,HYPER

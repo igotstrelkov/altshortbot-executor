@@ -97,10 +97,10 @@ const KC_OK = "200000"; // KuCoin success code in the { code, data } envelope
 
 // ─── Telegram ─────────────────────────────────────────────────────────────────
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN ?? "";
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID ?? "";
+const TELEGRAM_GROUP_ID = process.env.TELEGRAM_GROUP_ID ?? "";
 
 async function sendTelegram(msg: string): Promise<void> {
-  if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
+  if (!TELEGRAM_TOKEN || !TELEGRAM_GROUP_ID) {
     console.log("[telegram]", msg);
     return;
   }
@@ -109,7 +109,7 @@ async function sendTelegram(msg: string): Promise<void> {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        chat_id: TELEGRAM_CHAT_ID,
+        chat_id: TELEGRAM_GROUP_ID,
         text: msg,
         parse_mode: "Markdown",
       }),
@@ -174,7 +174,10 @@ async function postSignalEvent(
     });
     if (!res.ok) throw new Error(`ingest ${res.status}`);
   } catch (e) {
-    console.error("[convex] post failed, queued for retry:", (e as Error).message);
+    console.error(
+      "[convex] post failed, queued for retry:",
+      (e as Error).message,
+    );
     appendToOutbox({ event, signal }); // never rethrow
   }
 }
@@ -205,7 +208,11 @@ function appendToOutbox(entry: {
  * "closed". Stop on the first failure and keep the remainder for the next run.
  */
 async function flushOutbox(): Promise<void> {
-  if (!CONVEX_INGEST_URL || !CONVEX_INGEST_SECRET || !existsSync(CONVEX_OUTBOX_FILE))
+  if (
+    !CONVEX_INGEST_URL ||
+    !CONVEX_INGEST_SECRET ||
+    !existsSync(CONVEX_OUTBOX_FILE)
+  )
     return;
   let queue: any[] = [];
   try {

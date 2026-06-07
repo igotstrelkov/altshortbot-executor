@@ -629,10 +629,10 @@ function logPaperTrade(trade: PaperTrade): void {
 
 ```typescript
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN ?? "";
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID ?? "";
+const TELEGRAM_GROUP_ID = process.env.TELEGRAM_GROUP_ID ?? "";
 
 async function sendTelegram(message: string): Promise<void> {
-  if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
+  if (!TELEGRAM_TOKEN || !TELEGRAM_GROUP_ID) {
     console.log("[No Telegram]\n" + message);
     return;
   }
@@ -641,7 +641,7 @@ async function sendTelegram(message: string): Promise<void> {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        chat_id: TELEGRAM_CHAT_ID,
+        chat_id: TELEGRAM_GROUP_ID,
         text: message,
         parse_mode: "Markdown",
       }),
@@ -1345,7 +1345,7 @@ module.exports = {
       env: {
         NODE_ENV: "production",
         TELEGRAM_TOKEN: process.env.TELEGRAM_TOKEN ?? "",
-        TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID ?? "",
+        TELEGRAM_GROUP_ID: process.env.TELEGRAM_GROUP_ID ?? "",
       },
     },
     {
@@ -1360,7 +1360,7 @@ module.exports = {
       env: {
         NODE_ENV: "production",
         TELEGRAM_TOKEN: process.env.TELEGRAM_TOKEN ?? "",
-        TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID ?? "",
+        TELEGRAM_GROUP_ID: process.env.TELEGRAM_GROUP_ID ?? "",
         HL_WALLET_ADDRESS: process.env.HL_WALLET_ADDRESS ?? "",
         HL_AGENT_KEY: process.env.HL_AGENT_KEY ?? "",
         HL_PAPER_ACCOUNT: "10000", // simulated account size for paper mode
@@ -1383,7 +1383,7 @@ npm install tsx typescript @nktkas/hyperliquid viem
 
 # 2. Set environment variables
 export TELEGRAM_TOKEN="..."
-export TELEGRAM_CHAT_ID="..."
+export TELEGRAM_GROUP_ID="..."
 export HL_WALLET_ADDRESS="0x..."   # your main Hyperliquid wallet
 export HL_AGENT_KEY="0x..."        # separate agent wallet private key
 
