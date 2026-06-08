@@ -105,17 +105,24 @@ async function sendTelegram(msg: string): Promise<void> {
     return;
   }
   try {
-    await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: TELEGRAM_GROUP_ID,
-        text: msg,
-        parse_mode: "Markdown",
-      }),
-    });
+    const res = await fetch(
+      `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: TELEGRAM_GROUP_ID,
+          text: msg,
+          parse_mode: "Markdown",
+        }),
+      },
+    );
+    // A 400 (e.g. unbalanced Markdown — a lone `_` in PUMP_TOP) is a resolved
+    // fetch with res.ok === false, not a throw — surface it instead of silently
+    // dropping the message.
+    if (!res.ok) console.error(`[telegram] ${res.status}: ${await res.text()}`);
   } catch {
-    /* non-fatal */
+    /* network error — non-fatal */
   }
 }
 
@@ -779,7 +786,6 @@ async function executeSignal(
   await sendTelegram(
     `${mode}📉 *${coin}* SHORT opened\n` +
       `Entry: $${entry.toFixed(6)} | Stop: $${stopPx.toFixed(6)}\n` +
-      `Signal: ${signalType} (${confidence}) | Funding: ${fundingApr.toFixed(0)}% APR\n` +
       `Size: ${size.contracts} contract(s) | Notional: $${size.notionalUsdt.toFixed(0)} | ${leverage}×` +
       riskNote,
   );
