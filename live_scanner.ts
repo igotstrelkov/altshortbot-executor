@@ -809,6 +809,7 @@ function formatAlert(alert: Alert): string {
     `🔻 *${alert.coin}*`,
     `Entry: $${alert.entry.toFixed(4)}`,
     `Stop loss: $${stopLoss.toFixed(4)}`,
+    `Funding: ${alert.fundingApr.toFixed(1)}% APR`,
   ];
 
   if (alert.type === "EXHAUSTION" || alert.type === "TREND_BREAK") {
@@ -822,7 +823,7 @@ function formatAlert(alert: Alert): string {
   }
 
   if (alert.type === "EXHAUSTION" && alert.confidence === "HIGH")
-    lines.push("", `📐 Short entry — stop at -12% | target -15% to -40%`);
+    lines.push("", `📐 Short entry — stop at -15% | target -15% to -40%`);
   if (alert.type === "BUILDING") {
     // BUILDING is auto-traded when funding ≤ -180% APR (validated profitable
     // regime: 9/9 winners). Above that threshold it's informational only —

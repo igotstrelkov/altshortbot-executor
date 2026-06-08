@@ -63,6 +63,7 @@ const KUCOIN_API_PASSPHRASE = process.env.KUCOIN_API_PASSPHRASE ?? "";
 const PAPER_ACCOUNT = parseFloat(process.env.KUCOIN_PAPER_ACCOUNT ?? "10000");
 
 const CONVEX_INGEST_URL = process.env.CONVEX_INGEST_URL ?? "";
+const CONVEX_INGEST_URL_DEV = process.env.CONVEX_INGEST_URL_DEV ?? "";
 const CONVEX_INGEST_SECRET = process.env.CONVEX_INGEST_SECRET ?? "";
 const CONVEX_OUTBOX_FILE = "convex_outbox.json";
 
@@ -186,6 +187,23 @@ async function postSignalEvent(
       (e as Error).message,
     );
     appendToOutbox({ event, signal }); // never rethrow
+  }
+
+  try {
+    const res_dev = await fetch(CONVEX_INGEST_URL_DEV, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-ingest-secret": CONVEX_INGEST_SECRET,
+      },
+      body: JSON.stringify({ event, signal }),
+    });
+    if (!res_dev.ok) throw new Error(`ingest_dev ${res_dev.status}`);
+  } catch (e) {
+    console.error(
+      "[convex_dev] post failed, queued for retry:",
+      (e as Error).message,
+    );
   }
 }
 
