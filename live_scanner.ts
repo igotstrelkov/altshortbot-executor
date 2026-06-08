@@ -805,11 +805,38 @@ const STOP_LOSS_PCT = 0.15;
 
 function formatAlert(alert: Alert): string {
   const stopLoss = alert.entry * (1 + STOP_LOSS_PCT);
-  return [
-    `🔻 ${alert.coin}*`,
+  const lines = [
+    `🔻 *${alert.coin}*`,
     `Entry: $${alert.entry.toFixed(4)}`,
     `Stop loss: $${stopLoss.toFixed(4)}`,
-  ].join("\n");
+  ];
+
+  if (alert.type === "EXHAUSTION" || alert.type === "TREND_BREAK") {
+    if (alert.msSinceBuilding !== null) {
+      const h = Math.round(alert.msSinceBuilding / HOUR);
+      lines.push(`Building: ✅ ${h}h ago`);
+      if (h < 4) lines.push(`⚠️ Recent building — squeeze may continue`);
+    } else {
+      lines.push(`Building: ⚠️ No prior building — lower confidence`);
+    }
+  }
+
+  if (alert.type === "EXHAUSTION" && alert.confidence === "HIGH")
+    lines.push("", `📐 Short entry — stop at -12% | target -15% to -40%`);
+  if (alert.type === "BUILDING") {
+    // BUILDING is auto-traded when funding ≤ -180% APR (validated profitable
+    // regime: 9/9 winners). Above that threshold it's informational only —
+    // mega-squeezes have run another 80%+ before reversing.
+    if (alert.fundingApr <= MIN_FUNDING_APR) {
+      lines.push("", `📐 Short entry — extreme funding squeeze (auto-queued)`);
+    } else {
+      lines.push("", `⏳ Do NOT short yet — await exhaustion signal`);
+    }
+  }
+  if (alert.type === "TREND_BREAK")
+    lines.push("", `📐 Strong short — parabolic blow-off confirmed`);
+
+  return lines.join("\n");
 }
 
 async function sendTelegram(message: string): Promise<void> {
