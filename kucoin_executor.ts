@@ -889,7 +889,7 @@ async function executeSignal(
     firedAt: sig.firedAt,
     openedAt: record.openedAt,
     entryPx: fillPx,
-    signalPx: entry,
+    // signalPx: entry,
     stopLossPx: stopPx,
     fundingApr: sig.fundingApr,
     notionalUsdc: notionalUsdt,
