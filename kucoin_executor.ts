@@ -1,5 +1,5 @@
 /**
- * AltShortBot KuCoin Executor
+ * KuCoin Executor
  * ===========================
  * Runs every 5 minutes via PM2 cron. Reads signal_queue.json, opens shorts
  * on KuCoin USDT perpetuals, manages open positions (stop loss, 24h timeout).
@@ -280,12 +280,35 @@ function toKucoinSymbol(coin: string): string {
   return `${base}USDTM`;
 }
 
+/** Number of decimal places implied by a tick size (handles "1e-7" form). */
+function tickDecimals(tick: number): number {
+  if (!Number.isFinite(tick) || tick <= 0) return 0;
+  const s = tick.toString();
+  const exp = s.match(/e-(\d+)/i);
+  if (exp) return parseInt(exp[1], 10);
+  const dot = s.indexOf(".");
+  return dot === -1 ? 0 : s.length - dot - 1;
+}
+
+/**
+ * Round a price to the instrument's tick grid and render it cleanly.
+ * `(Math.round(px/tick)*tick).toString()` reintroduces float error — e.g.
+ * 0.105938 on a 0.0001 tick becomes "0.10590000000000001", which KuCoin
+ * rejects for exceeding tick precision. Formatting to the tick's decimal
+ * count produces a value the exchange accepts.
+ */
+function formatToTick(px: number, tickSize: number): string {
+  if (!(tickSize > 0)) return px.toString();
+  const rounded = Math.round(px / tickSize) * tickSize;
+  return rounded.toFixed(tickDecimals(tickSize));
+}
+
 // ─── Verified KuCoin response accessors ────────────────────────────────────────
 // Field names below are confirmed against live API responses (probe script):
 //   getSymbol().data   → multiplier, lotSize, maxLeverage, tickSize,
 //                        quoteCurrency, status, lastTradePrice, markPrice
 //   getBalance().data  → accountEquity
-//   getPosition().data → currentQty (signed contracts), isOpen
+//   getPosition().data → currentQty (signed contracts), isOpen, avgEntryPrice
 // The SDK returns the full { code, data } envelope; we unwrap .data here.
 
 interface KucoinEnvelope<T> {
@@ -452,19 +475,33 @@ function calcSize(
 
 // ─── Trading functions ─────────────────────────────────────────────────────────
 /**
- * Open a short with an attached stop-loss order.
- * Two KuCoin orders: a market short entry, then a stop-market close order
- * (`stop: 'up'` triggers when price rises into the stop — correct for a short).
- * Returns the entry orderId on success, null on failure.
+ * Open a short, then attach a stop-market close order anchored to the ACTUAL
+ * fill price (`stop:'up'` triggers when price rises into the stop — correct for
+ * a short). If the fill price can't be read or the stop is rejected, the entry
+ * is immediately closed rather than left running unprotected. Returns the
+ * OpenResult on success, null on failure (including the close-on-unprotected
+ * path).
  */
+interface OpenResult {
+  orderId: string;
+  fillPx: number; // actual average fill price (signal px in paper / on fallback)
+  stopPx: number; // stop actually placed, derived from fillPx
+}
+
 async function openShort(
   symbol: string,
   contracts: number,
-  stopPx: number,
+  signalEntryPx: number,
   leverage: number,
   tickSize: number,
-): Promise<string | null> {
-  if (IS_PAPER) return "PAPER";
+): Promise<OpenResult | null> {
+  if (IS_PAPER) {
+    return {
+      orderId: "PAPER",
+      fillPx: signalEntryPx,
+      stopPx: signalEntryPx * (1 + RISK.stopLossPct),
+    };
+  }
 
   try {
     // 0) Ensure the contract is in ISOLATED margin mode before ordering.
@@ -510,12 +547,30 @@ async function openShort(
     }
     const orderId: string | null = entryRes.data?.orderId ?? null;
 
+    // 1b) Resolve the ACTUAL average fill price. A market order can fill far
+    //     from the scanner's signal price when the market moved between scan
+    //     and execution; anchoring the stop to the stale signal price can place
+    //     it beyond the liquidation point so the stop never fires (the failure
+    //     mode that liquidated the first live trades). Fall back to the signal
+    //     price only if the fill cannot be read, and alert when that happens.
+    const avgPx = await fetchAvgEntryPrice(symbol);
+    if (avgPx === null) {
+      // Without the real fill we cannot place a correct stop. Rather than run a
+      // leveraged short on a stale-price (or no) stop, close the entry now.
+      await alertError(
+        `openShort(${symbol}) — could not read fill price; closing the entry ` +
+          `to avoid an unprotected position, verify flat on kucoin.com`,
+        "getPosition returned no avgEntryPrice",
+      );
+      await closePosition(symbol, "unprotected — fill price unreadable");
+      return null;
+    }
+    const fillPx = avgPx;
+    const stopPxNum = fillPx * (1 + RISK.stopLossPct);
+
     // 2) Stop-loss: stop-market close order. stop:'up' fires when price rises
     //    to stopPrice. closeOrder:true closes the position regardless of size.
-    const stopPrice =
-      tickSize > 0
-        ? (Math.round(stopPx / tickSize) * tickSize).toString()
-        : stopPx.toString();
+    const stopPrice = formatToTick(stopPxNum, tickSize);
     const stopRes = (await client.submitOrder({
       clientOid: client.generateNewOrderID(),
       symbol,
@@ -529,14 +584,16 @@ async function openShort(
     })) as KucoinEnvelope<any>;
 
     if (stopRes?.code !== KC_OK) {
-      // Entry succeeded but stop did not — this is dangerous; alert loudly.
+      // Entry succeeded but the stop did not — do NOT run unprotected. Close it.
       await alertError(
-        `openShort(${symbol}) STOP FAILED — position is UNPROTECTED, ` +
-          `set a stop manually on KuCoin`,
+        `openShort(${symbol}) STOP REJECTED — closing the entry to avoid an ` +
+          `unprotected position, verify flat on kucoin.com`,
         `KuCoin ${stopRes?.code ?? "?"}: ${stopRes?.msg ?? "(no message)"}`,
       );
+      await closePosition(symbol, "unprotected — stop rejected");
+      return null;
     }
-    return orderId;
+    return { orderId: orderId ?? "", fillPx, stopPx: stopPxNum };
   } catch (e) {
     await alertError(`openShort(${symbol})`, e);
     return null;
@@ -629,6 +686,34 @@ async function fetchLivePositionQty(symbol: string): Promise<number> {
   }
 }
 
+/**
+ * Average entry price of the freshly-opened position, read from KuCoin.
+ * A market order can fill far from the scanner's signal price when the market
+ * moved between scan and execution — the stop and all P&L must anchor to THIS,
+ * not the signal price. Polls getPosition a few times because the position can
+ * take a moment to reflect after the entry fills. Returns null if it cannot be
+ * determined (caller falls back to the signal price and alerts).
+ */
+async function fetchAvgEntryPrice(symbol: string): Promise<number | null> {
+  if (IS_PAPER) return null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const data = unwrap<any>(
+        await client.getPosition({ symbol }),
+        `getPosition(${symbol})`,
+      );
+      if (data && data.isOpen !== false) {
+        const px = Number(data.avgEntryPrice);
+        if (Number.isFinite(px) && px > 0) return px;
+      }
+    } catch {
+      /* transient — retry */
+    }
+    await sleep(300);
+  }
+  return null;
+}
+
 // ─── Position management ───────────────────────────────────────────────────────
 async function managePositions(store: KucoinPositionStore): Promise<void> {
   const nowMs = Date.now();
@@ -666,9 +751,21 @@ async function managePositions(store: KucoinPositionStore): Promise<void> {
       // in case of a partial fill or any other order resting on the symbol.
       if (!IS_PAPER) await cancelStopOrders(symbol);
     } else if (ageH >= RISK.timeoutH) {
-      closeReason = "timeout";
       // closePosition market-closes AND cancels the never-fired resting stop.
-      if (!IS_PAPER) await closePosition(symbol, "timeout");
+      // Only finalize the close (record + delete) if it actually succeeded —
+      // otherwise the position is STILL OPEN on the exchange and must be kept
+      // for retry next run, not forgotten (a forgotten position is unmanaged
+      // and a later signal on the same coin would stack a second position).
+      if (!IS_PAPER) {
+        const closed = await closePosition(symbol, "timeout");
+        if (!closed) {
+          console.log(
+            `  ${coin}: timeout close FAILED — keeping position for next-run retry`,
+          );
+          continue; // do not record/delete; managePositions retries next run
+        }
+      }
+      closeReason = "timeout";
     }
 
     if (closeReason) {
@@ -747,31 +844,37 @@ async function executeSignal(
   }
 
   const leverage = Math.min(RISK.maxLeverage, spec.maxLeverage);
-  const stopPx = entry * (1 + RISK.stopLossPct);
 
-  // Risk-based sizing → integer contracts (round-up policy).
+  // Risk-based sizing → integer contracts (round-up policy). Sizing uses the
+  // signal price to pick a contract count; once the order fills, bookkeeping is
+  // re-anchored to the actual fill price returned by openShort.
   const size = calcSize(equity, entry, spec);
-  const riskPctStr = (size.actualRiskFrac * 100).toFixed(1);
 
-  const orderId = await openShort(
+  const opened = await openShort(
     symbol,
     size.contracts,
-    stopPx,
+    entry,
     leverage,
     spec.tickSize,
   );
-  if (!orderId) return;
+  if (!opened) return;
+  const { fillPx, stopPx } = opened;
 
-  // sizeCoin = contract count × coins-per-contract (for P&L bookkeeping).
-  const sizeCoin = size.contracts * spec.multiplier;
+  // Anchor ALL bookkeeping to the actual fill price, not the signal price —
+  // entryPx, stop, notional and risk are meaningless if the fill diverged.
+  const sizeCoin = size.contracts * spec.multiplier; // contracts × coins/contract
+  const notionalUsdt = sizeCoin * fillPx;
+  const actualRiskFrac = (notionalUsdt * RISK.stopLossPct) / equity;
+  const riskPctStr = (actualRiskFrac * 100).toFixed(1);
+
   const record: PositionRecord = {
     coin,
     openedAt: Date.now(),
-    entryPx: entry,
+    entryPx: fillPx,
     sizeCoin,
-    notionalUsdc: size.notionalUsdt,
+    notionalUsdc: notionalUsdt,
     stopLossPx: stopPx,
-    targetPx: entry * (1 - RISK.stopLossPct), // informational only
+    targetPx: fillPx * (1 - RISK.stopLossPct), // informational only
     trailingActive: false,
     signalType: signalType as PositionRecord["signalType"],
     signalConfidence: confidence as PositionRecord["signalConfidence"],
@@ -785,31 +888,41 @@ async function executeSignal(
     confidence,
     firedAt: sig.firedAt,
     openedAt: record.openedAt,
-    entryPx: entry,
+    entryPx: fillPx,
+    signalPx: entry,
     stopLossPx: stopPx,
     fundingApr: sig.fundingApr,
-    notionalUsdc: size.notionalUsdt,
+    notionalUsdc: notionalUsdt,
     leverage,
     isPaper: IS_PAPER,
   });
 
   // Round-up can push realized risk above target — flag it (informational).
   const riskNote =
-    size.actualRiskFrac > RISK.riskPerTrade * RISK_NOTE_MULTIPLE
+    actualRiskFrac > RISK.riskPerTrade * RISK_NOTE_MULTIPLE
       ? `\n⚠️ size rounded up — actual risk ${riskPctStr}% ` +
         `(target ${(RISK.riskPerTrade * 100).toFixed(0)}%)`
+      : "";
+
+  // Flag a large gap between signal price and actual fill — the exact condition
+  // that, before fill-anchored stops, placed the stop beyond liquidation.
+  const slipPct = ((fillPx - entry) / entry) * 100;
+  const slipNote =
+    Math.abs(slipPct) > 5
+      ? `\nℹ️ fill ${slipPct >= 0 ? "+" : ""}${slipPct.toFixed(1)}% vs signal $${entry.toFixed(6)}`
       : "";
 
   const mode = IS_PAPER ? "📄 " : "";
   await sendTelegram(
     `${mode}📉 *${coin}* SHORT opened\n` +
-      `Entry: $${entry.toFixed(6)} | Stop: $${stopPx.toFixed(6)}\n` +
-      `Size: ${size.contracts} contract(s) | Notional: $${size.notionalUsdt.toFixed(0)} | ${leverage}×` +
-      riskNote,
+      `Entry: $${fillPx.toFixed(6)} | Stop: $${stopPx.toFixed(6)}\n` +
+      `Size: ${size.contracts} contract(s) | Notional: $${notionalUsdt.toFixed(0)} | ${leverage}×` +
+      riskNote +
+      slipNote,
   );
   console.log(
-    `  ${coin}: SHORT opened — ${size.contracts} contract(s) entry $${entry.toFixed(6)} ` +
-      `stop $${stopPx.toFixed(6)} notional $${size.notionalUsdt.toFixed(0)} ` +
+    `  ${coin}: SHORT opened — ${size.contracts} contract(s) entry $${fillPx.toFixed(6)} ` +
+      `stop $${stopPx.toFixed(6)} notional $${notionalUsdt.toFixed(0)} ` +
       `risk ${riskPctStr}% (${IS_PAPER ? "PAPER" : "LIVE"})`,
   );
 }
@@ -817,7 +930,7 @@ async function executeSignal(
 // ─── Status display ────────────────────────────────────────────────────────────
 async function printStatus(store: KucoinPositionStore): Promise<void> {
   const nowMs = Date.now();
-  console.log(`\nAltShortBot KuCoin — ${new Date().toISOString()}`);
+  console.log(`\nKuCoin — ${new Date().toISOString()}`);
   console.log(`Mode: ${IS_PAPER ? "PAPER" : "LIVE"}`);
   console.log(`Paper equity: $${store.paperEquityUsdt.toFixed(2)} USDT\n`);
 
@@ -857,7 +970,7 @@ async function printStatus(store: KucoinPositionStore): Promise<void> {
 
 // ─── Main ──────────────────────────────────────────────────────────────────────
 async function main(): Promise<void> {
-  console.log(`\nAltShortBot KuCoin Executor — ${new Date().toISOString()}`);
+  console.log(`\nKuCoin Executor — ${new Date().toISOString()}`);
   console.log(`Mode: ${IS_PAPER ? "PAPER" : "LIVE"}`);
 
   const store = loadPositions();

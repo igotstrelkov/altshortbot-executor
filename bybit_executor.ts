@@ -245,23 +245,40 @@ async function setLeverage(
   }
 }
 
+interface OpenResult {
+  orderId: string;
+  fillPx: number; // actual average fill price (signal px in paper / on fallback)
+  stopPx: number; // stop actually set, derived from fillPx
+}
+
 /**
- * Open a short position with attached stop loss.
- * Returns the Bybit orderId on success, null on failure.
+ * Open a short, then attach a stop anchored to the ACTUAL fill price.
+ * The market order is submitted WITHOUT an inline stop: a market order can fill
+ * far from the scanner's signal price when the market moved between scan and
+ * execution, and anchoring the stop to the stale signal price can place it
+ * beyond the liquidation point so it never fires. We read the real avg fill
+ * from the position and set the stop from THAT. If the fill can't be read or
+ * the stop is rejected, the entry is immediately closed rather than left
+ * running unprotected. Returns null on entry failure or the close-on-
+ * unprotected path.
  */
 async function openShort(
   coin: string,
-  price: number,
+  price: number, // signal entry price — used only for sizing & fallback
   notional: number,
-  stopPx: number,
   leverage: number,
   instr: InstrumentInfo,
-): Promise<string | null> {
-  if (IS_PAPER) return "PAPER";
+): Promise<OpenResult | null> {
+  if (IS_PAPER) {
+    return {
+      orderId: "PAPER",
+      fillPx: price,
+      stopPx: price * (1 + RISK.stopLossPct),
+    };
+  }
 
   const qty = notional / price;
   const qtyStr = formatQty(qty, instr.qtyStep);
-  const stopStr = formatPrice(stopPx, instr.tickSize);
 
   if (parseFloat(qtyStr) < parseFloat(instr.minQty)) {
     console.log(
@@ -271,15 +288,13 @@ async function openShort(
   }
 
   try {
+    // 1) Market entry — no inline stop; the stop must anchor to the fill.
     const res = await client.submitOrder({
       category: "linear",
       symbol: `${coin}USDT`,
       side: "Sell",
       orderType: "Market",
       qty: qtyStr,
-      stopLoss: stopStr,
-      slTriggerBy: "MarkPrice",
-      tpslMode: "Full",
       positionIdx: 0, // one-way mode
     });
     if (res.retCode !== 0) {
@@ -289,7 +304,45 @@ async function openShort(
       );
       return null;
     }
-    return res.result?.orderId ?? null;
+    const orderId = res.result?.orderId ?? null;
+
+    // 2) Resolve the ACTUAL average fill price from the position.
+    const avgPx = await fetchPositionEntry(coin);
+    if (avgPx === null) {
+      // Without the real fill we cannot place a correct stop. Rather than run a
+      // leveraged short on a stale-price (or no) stop, close the entry now.
+      await alertError(
+        `openShort(${coin}) — could not read fill price; closing the entry ` +
+          `to avoid an unprotected position, verify flat on app.bybit.com`,
+        "getPositionInfo returned no avgPrice",
+      );
+      await closePosition(coin, "unprotected — fill price unreadable");
+      return null;
+    }
+    const fillPx = avgPx;
+    const stopPx = fillPx * (1 + RISK.stopLossPct);
+
+    // 3) Attach the stop, anchored to the fill. A short's stop sits ABOVE entry.
+    const stopStr = formatPrice(stopPx, instr.tickSize);
+    const slRes = await client.setTradingStop({
+      category: "linear",
+      symbol: `${coin}USDT`,
+      stopLoss: stopStr,
+      slTriggerBy: "MarkPrice",
+      tpslMode: "Full",
+      positionIdx: 0,
+    });
+    if (slRes.retCode !== 0) {
+      // Entry succeeded but the stop did not — do NOT run unprotected. Close it.
+      await alertError(
+        `openShort(${coin}) STOP REJECTED — closing the entry to avoid an ` +
+          `unprotected position, verify flat on app.bybit.com`,
+        `retCode ${slRes.retCode}: ${slRes.retMsg}`,
+      );
+      await closePosition(coin, "unprotected — stop rejected");
+      return null;
+    }
+    return { orderId: orderId ?? "", fillPx, stopPx };
   } catch (e) {
     await alertError(`openShort(${coin})`, e);
     return null;
@@ -340,6 +393,31 @@ async function fetchLivePositionSize(coin: string): Promise<number> {
   } catch {
     return -1;
   } // -1 = unknown, don't close
+}
+
+/**
+ * Average entry price of the freshly-opened position (null if unreadable).
+ * Polls a few times because the position can take a moment to reflect after a
+ * market order fills. The stop and all P&L must anchor to this, not the signal
+ * price — see openShort.
+ */
+async function fetchPositionEntry(coin: string): Promise<number | null> {
+  if (IS_PAPER) return null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const res = await client.getPositionInfo({
+        category: "linear",
+        symbol: `${coin}USDT`,
+      });
+      const pos = res.result?.list?.[0];
+      const px = pos ? parseFloat(pos.avgPrice ?? "0") : 0;
+      if (Number.isFinite(px) && px > 0) return px;
+    } catch {
+      /* transient — retry */
+    }
+    await sleep(300);
+  }
+  return null;
 }
 
 // ─── Position management ───────────────────────────────────────────────────────
@@ -444,7 +522,6 @@ async function executeSignal(
   const leverage = Math.min(RISK.maxLeverage, instr.maxLev);
   const riskUsdt = equity * RISK.riskPerTrade;
   const notional = riskUsdt / RISK.stopLossPct;
-  const stopPx = entry * (1 + RISK.stopLossPct);
 
   // Set leverage before entry
   const levOk = await setLeverage(coin, leverage, instr.maxLev);
@@ -453,44 +530,50 @@ async function executeSignal(
     return;
   }
 
-  const orderId = await openShort(
-    coin,
-    entry,
-    notional,
-    stopPx,
-    leverage,
-    instr,
-  );
-  if (!orderId) return;
+  const opened = await openShort(coin, entry, notional, leverage, instr);
+  if (!opened) return;
+  const { fillPx, stopPx } = opened;
 
-  const sizeCoin = notional / entry;
+  // Anchor ALL bookkeeping to the actual fill price, not the signal price —
+  // entryPx, stop and notional are meaningless if the fill diverged.
+  const sizeCoin = notional / entry; // coins ordered (sized off signal price)
+  const notionalUsdt = sizeCoin * fillPx; // actual USDT notional at the fill
   const record: PositionRecord = {
     coin,
     openedAt: Date.now(),
-    entryPx: entry,
+    entryPx: fillPx,
     sizeCoin,
-    notionalUsdc: notional,
+    notionalUsdc: notionalUsdt,
     stopLossPx: stopPx,
-    targetPx: entry * 0.75, // 25% target (informational)
+    targetPx: fillPx * 0.75, // 25% target (informational)
     trailingActive: false,
     signalType: signalType as PositionRecord["signalType"],
     signalConfidence: confidence as PositionRecord["signalConfidence"],
     isPaper: IS_PAPER,
-    ...(orderId !== "PAPER" ? { stopOid: undefined } : {}),
+    ...(opened.orderId !== "PAPER" ? { stopOid: undefined } : {}),
   };
 
   store.open[coin] = record;
 
+  // Flag a large gap between signal price and actual fill — the exact condition
+  // that, before fill-anchored stops, placed the stop beyond liquidation.
+  const slipPct = ((fillPx - entry) / entry) * 100;
+  const slipNote =
+    Math.abs(slipPct) > 5
+      ? `\nℹ️ fill ${slipPct >= 0 ? "+" : ""}${slipPct.toFixed(1)}% vs signal $${entry.toFixed(6)}`
+      : "";
+
   const mode = IS_PAPER ? "📄 " : "";
   await sendTelegram(
     `${mode}📉 *${coin}* SHORT opened\n` +
-      `Entry: $${entry.toFixed(6)} | Stop: $${stopPx.toFixed(6)}\n` +
+      `Entry: $${fillPx.toFixed(6)} | Stop: $${stopPx.toFixed(6)}\n` +
       `Signal: ${signalType} (${confidence}) | Funding: ${fundingApr.toFixed(0)}% APR\n` +
-      `Notional: $${notional.toFixed(0)} | Leverage: ${leverage}×`,
+      `Notional: $${notionalUsdt.toFixed(0)} | Leverage: ${leverage}×` +
+      slipNote,
   );
   console.log(
-    `  ${coin}: SHORT opened — entry $${entry.toFixed(6)} stop $${stopPx.toFixed(6)} ` +
-      `notional $${notional.toFixed(0)} (${IS_PAPER ? "PAPER" : "LIVE"})`,
+    `  ${coin}: SHORT opened — entry $${fillPx.toFixed(6)} stop $${stopPx.toFixed(6)} ` +
+      `notional $${notionalUsdt.toFixed(0)} (${IS_PAPER ? "PAPER" : "LIVE"})`,
   );
 }
 
