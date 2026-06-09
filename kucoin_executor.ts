@@ -70,7 +70,7 @@ const CONVEX_OUTBOX_FILE = "convex_outbox.json";
 // Risk block — identical values to bybit_executor.ts. See CLAUDE.md.
 const RISK = {
   maxLeverage: 3,
-  riskPerTrade: 0.03, // 3% account risk per trade
+  riskPerTrade: 0.05, // 5% account risk per trade
   stopLossPct: 0.15, // 15% stop loss
   maxPositions: 5, // max concurrent open positions
   timeoutH: 24, // close after 24h regardless (validated 2026-05-28: 24h optimal vs 48h/72h)

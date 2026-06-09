@@ -11,7 +11,7 @@ import type { Alert, QueuedSignal } from "./shared_types.ts";
  *
  * Data source: Bybit only (candles, funding, OI, coin discovery).
  * The 9 validated coins (HYPER, HIVE, KNC, WIF, BSB, SPK, ENJ, ORDI, DASH)
- * were used to tune the algorithm — the same parameters apply to all coins.
+ * were used to tune the algorithm: the same parameters apply to all coins.
  *
  * Setup:
  *   1. Create a Telegram bot via @BotFather → get token
@@ -35,13 +35,13 @@ import type { Alert, QueuedSignal } from "./shared_types.ts";
  */
 
 // ─── Coin discovery ──────────────────────────────────────────────────────────
-// The scanner runs against ALL active USDT perpetuals — not a fixed watchlist.
+// The scanner runs against ALL active USDT perpetuals: not a fixed watchlist.
 // The 9 coins (HYPER, HIVE, KNC, WIF, BSB, SPK, ENJ, ORDI, DASH) were used
 // to validate and tune the algorithm. Those same parameters now apply universally.
 // New listings are picked up automatically; delisted coins drop off cleanly.
 
 // Skip these regardless: index tokens / large caps that almost never fire, plus
-// FIDA — its extreme-funding BUILDINGs are mega-squeeze traps (funding to
+// FIDA: its extreme-funding BUILDINGs are mega-squeeze traps (funding to
 // ~-21900% APR with +30-42% adverse runs; net loser on the universe backtest).
 // EDEN was removed from this list 2026-06-07: it backtested as a clean earner
 // (+5.2% equity over 60d, 6W/1L) and had no documented reason to be excluded.
@@ -90,9 +90,7 @@ async function fetchAllCoins(): Promise<string[]> {
   } catch {
     /* fall through */
   }
-  console.warn(
-    "  ⚠️  Could not fetch coin list — using fallback validated set",
-  );
+  console.warn("  ⚠️  Could not fetch coin list: using fallback validated set");
   return FALLBACK_COINS;
 }
 
@@ -106,7 +104,7 @@ const BUILDING_REFIRE_MULTIPLIER = 2.0;
 // the -180..-200 band backtested as the highest-win-rate marginal slice (82%
 // win, +0.28R) and beat -200 on return in both halves of a 120d out-of-sample
 // split with matched drawdown. Looser floors (-150/-120) added drawdown without
-// robust return gain — rejected. See CLAUDE.md "Validated signal parameters".
+// robust return gain: rejected. See CLAUDE.md "Validated signal parameters".
 const MIN_FUNDING_APR = -180;
 const MIN_EXHAUSTION_GAP_H = 6; // Exhaustion re-fire minimum gap (hours)
 const STATE_FILE = "scanner_state.json";
@@ -114,10 +112,10 @@ const BB_BASE = "https://api.bybit.com";
 
 // ─── Validated parameters (from backtesting across 10 coins) ─────────────────
 const PARAMS = {
-  // Gate 1 — crowded longs
+  // Gate 1: crowded longs
   fundingAprThreshold: 10,
   minPositiveReadings: 2,
-  // Gate 2 — OI divergence
+  // Gate 2: OI divergence
   minOiChangePct: 2,
   maxPriceChangePct: 2,
   // Pump top
@@ -125,14 +123,14 @@ const PARAMS = {
   pumpMinVolMult: 5,
   pumpMinRsi: 88,
   pumpMinFundingApr: 0,
-  // Short squeeze — building phase
+  // Short squeeze: building phase
   squeezeMinPct: 20,
   squeezeHours: 10,
   squeezeMaxFundingApr: -100,
   squeezeMinOiDrop: 0,
-  // Short squeeze — exhaustion phase
+  // Short squeeze: exhaustion phase
   exhaustMaxFundingApr: -20,
-  exhaustMinOiDrop: 3, // OI must drop ≥3% — blocks flat-OI false positives (NOT coin)
+  exhaustMinOiDrop: 3, // OI must drop ≥3%: blocks flat-OI false positives (NOT coin)
   // Trend filter
   trendDays7Pct: 30,
   trendDays14Pct: 50,
@@ -162,13 +160,13 @@ interface CoinState {
   squeezeWaveStartMs: number | null;
   squeezeWaveHighPrice: number;
   lastBuildingSignalMs: number | null;
-  lastBuildingMinFunding: number; // persists across wave resets — needed for TREND_BREAK
+  lastBuildingMinFunding: number; // persists across wave resets: needed for TREND_BREAK
   lastSqueezePhase: "BUILDING" | "EXHAUSTION" | "TREND_BREAK" | null;
   // Per-wave fired flags
   waveAlertedBuilding: boolean; // BUILDING fires once per wave
-  lastBuildingFundingApr: number; // funding APR when last BUILDING fired — used for re-fire
+  lastBuildingFundingApr: number; // funding APR when last BUILDING fired: used for re-fire
   waveAlertedTrendBreak: boolean; // TREND_BREAK fires once per trending episode
-  // Exhaustion: timestamp-based (6h minimum gap) — allows re-fire after early bad signal
+  // Exhaustion: timestamp-based (6h minimum gap): allows re-fire after early bad signal
   lastExhaustionMs: number | null;
   // Funding cooldown
   lastFundingAlertMs: number | null;
@@ -271,7 +269,7 @@ async function fetchJSON(url: string): Promise<unknown> {
         await sleep(2000 * (attempt + 1));
         continue;
       }
-      if (res.status === 403) throw new Error("403 — coin may be delisted");
+      if (res.status === 403) throw new Error("403: coin may be delisted");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return res.json();
     } catch (e) {
@@ -287,7 +285,7 @@ async function fetchCandles(coin: string, limit: number): Promise<Candle[]> {
   const raw = (await fetchJSON(
     `${BB_BASE}/v5/market/kline?category=linear&symbol=${coin}USDT&interval=60&limit=${limit}`,
   )) as { result?: { list?: string[][] } };
-  // Bybit returns newest-first — reverse to get chronological order
+  // Bybit returns newest-first: reverse to get chronological order
   return (raw?.result?.list ?? []).reverse().map((r) => ({
     t: parseInt(r[0]),
     o: parseFloat(r[1]),
@@ -337,13 +335,13 @@ async function fetchFundingBinance(coin: string): Promise<FundingRecord[]> {
       fundingTime: number;
       fundingRate: string;
     }[];
-    // Binance settles every 8h — divide by 8 for per-hour rate
+    // Binance settles every 8h: divide by 8 for per-hour rate
     return raw.map((r) => ({
       timeMs: r.fundingTime,
       ratePerHour: parseFloat(r.fundingRate) / 8,
     }));
   } catch {
-    return []; // non-fatal — Bybit funding still used
+    return []; // non-fatal: Bybit funding still used
   }
 }
 
@@ -377,7 +375,7 @@ function buildMergedFundingByHour(
   const bbMap = forwardFill(bybit);
   const bnMap = forwardFill(binance);
 
-  // Union of all timestamps — take most extreme (highest absolute) per hour
+  // Union of all timestamps: take most extreme (highest absolute) per hour
   const allTs = Array.from(
     new Set([...Object.keys(bbMap), ...Object.keys(bnMap)].map(Number)),
   );
@@ -687,7 +685,7 @@ function scanCoin(
     price14d !== null &&
     isTrendingFull(price, price7d, price14d);
 
-  // Trend exit detection — runs every hour regardless of squeeze state
+  // Trend exit detection: runs every hour regardless of squeeze state
   const wasTrending = newState.wasTrending ?? false;
   if (wasTrending && !trending) newState.waveAlertedTrendBreak = false;
   newState.wasTrending = trending;
@@ -800,13 +798,13 @@ const DRY_RUN = process.argv.includes("--dry-run");
 
 // Stop loss mirrors the executor RISK block (stopLossPct 0.15): a short stops
 // out when price rises 15% above entry. Kept as a local constant because the
-// scanner does not import the executor's RISK — keep the two in sync.
+// scanner does not import the executor's RISK: keep the two in sync.
 const STOP_LOSS_PCT = 0.15;
 
 function formatAlert(alert: Alert): string {
   const stopLoss = alert.entry * (1 + STOP_LOSS_PCT);
   const lines = [
-    `🔻 *${alert.coin}*`,
+    `*${alert.coin}*`,
     `Entry: $${alert.entry.toFixed(4)}`,
     `Stop loss: $${stopLoss.toFixed(4)}`,
     `Funding: ${alert.fundingApr.toFixed(1)}% APR`,
@@ -816,26 +814,26 @@ function formatAlert(alert: Alert): string {
     if (alert.msSinceBuilding !== null) {
       const h = Math.round(alert.msSinceBuilding / HOUR);
       lines.push(`Building: ✅ ${h}h ago`);
-      if (h < 4) lines.push(`⚠️ Recent building — squeeze may continue`);
+      if (h < 4) lines.push(`⚠️ Recent building: squeeze may continue`);
     } else {
-      lines.push(`Building: ⚠️ No prior building — lower confidence`);
+      lines.push(`Building: ⚠️ No prior building: lower confidence`);
     }
   }
 
   if (alert.type === "EXHAUSTION" && alert.confidence === "HIGH")
-    lines.push("", `📐 Short entry — stop at -15% | target -15% to -40%`);
+    lines.push("", `📐 Short entry: stop at -15% | target -15% to -40%`);
   if (alert.type === "BUILDING") {
     // BUILDING is auto-traded when funding ≤ -180% APR (validated profitable
     // regime: 9/9 winners). Above that threshold it's informational only —
     // mega-squeezes have run another 80%+ before reversing.
     if (alert.fundingApr <= MIN_FUNDING_APR) {
-      lines.push("", `📐 Short entry — extreme funding squeeze (auto-queued)`);
+      lines.push("", `📐 Short entry: extreme funding squeeze (auto-queued)`);
     } else {
-      lines.push("", `⏳ Do NOT short yet — await exhaustion signal`);
+      lines.push("", `⏳ Do NOT short yet: await exhaustion signal`);
     }
   }
   if (alert.type === "TREND_BREAK")
-    lines.push("", `📐 Strong short — parabolic blow-off confirmed`);
+    lines.push("", `📐 Strong short: parabolic blow-off confirmed`);
 
   return lines.join("\n");
 }
@@ -861,7 +859,7 @@ async function sendTelegram(message: string): Promise<void> {
     if (!res.ok)
       console.error(`Telegram error ${res.status}: ${await res.text()}`);
   } catch (err) {
-    // Log but do not rethrow — failure is non-fatal; state still saves; scanner continues
+    // Log but do not rethrow: failure is non-fatal; state still saves; scanner continues
     console.error(`Telegram send failed: ${(err as Error).message}`);
   }
 }
@@ -871,7 +869,7 @@ async function getCoins(): Promise<string[]> {
   const arg = process.argv.find((_, i) => process.argv[i - 1] === "--coins");
   const env = process.env.SCANNER_COINS;
   if (arg ?? env) {
-    // Explicit override — use as-is
+    // Explicit override: use as-is
     return (arg ?? env)!
       .split(",")
       .map((c) => c.trim().toUpperCase())
@@ -885,7 +883,7 @@ async function main(): Promise<void> {
   const coins = await getCoins();
   const state = loadState();
 
-  console.log(`\nAltShortBot Scanner — ${new Date().toISOString()}`);
+  console.log(`\nAltShortBot Scanner: ${new Date().toISOString()}`);
   console.log(`Scanning ${coins.length} coin(s)...`);
 
   const allAlerts: Alert[] = [];
@@ -896,7 +894,7 @@ async function main(): Promise<void> {
       const [candles, bbFunding, bnFunding] = await Promise.all([
         fetchCandles(coin, 500),
         fetchFundingBybit(coin),
-        fetchFundingBinance(coin), // non-fatal — returns [] on error
+        fetchFundingBinance(coin), // non-fatal: returns [] on error
       ]);
 
       if (candles.length < 50) {
@@ -935,7 +933,7 @@ async function main(): Promise<void> {
   // Send alerts then save state.
   // State saves regardless of individual Telegram send success.
   for (const alert of allAlerts) {
-    // FUNDING is purely informational — broad-market regimes can produce
+    // FUNDING is purely informational: broad-market regimes can produce
     // hundreds per scan, drowning the chat. It never affects positions
     // (queue filter below excludes it). Still appears in PM2 logs for review.
     if (alert.type !== "FUNDING") {
@@ -944,18 +942,18 @@ async function main(): Promise<void> {
     }
 
     // Queue tradeable signals for the executor.
-    //   • PUMP_TOP — validated tradeable signal (universe backtest: 76% win).
-    //   • TREND_BREAK (HIGH/MEDIUM) — parabolic blow-off short.
-    //   • BUILDING with fundingApr ≤ -180% APR (MIN_FUNDING_APR) — validated
+    //   • PUMP_TOP: validated tradeable signal (universe backtest: 76% win).
+    //   • TREND_BREAK (HIGH/MEDIUM): parabolic blow-off short.
+    //   • BUILDING with fundingApr ≤ -180% APR (MIN_FUNDING_APR): validated
     //     profitable. Floor loosened -200 → -180 on 2026-06-07: the -180..-200
     //     band was the highest-win-rate marginal slice (82% win) and beat -200
     //     on return in a 120d out-of-sample split with matched drawdown. Looser
-    //     floors (-150/-120) added drawdown without robust gain — rejected.
-    //   • EXHAUSTION — queueing SUSPENDED. Universe backtest showed negative
-    //     realized P&L (-20% to -4%/trade, 86% stopped) — the detector fires
+    //     floors (-150/-120) added drawdown without robust gain: rejected.
+    //   • EXHAUSTION: queueing SUSPENDED. Universe backtest showed negative
+    //     realized P&L (-20% to -4%/trade, 86% stopped): the detector fires
     //     while squeezes are still accelerating. Telegram alerts still fire
     //     for observability; re-enable once the detector is fixed.
-    // LOW confidence stays Telegram-only — too risky for auto-execution.
+    // LOW confidence stays Telegram-only: too risky for auto-execution.
     // DRY_RUN suppresses queue writes so a hand-triggered scan can't bleed into
     // the executor's pickup. Telegram still fires (above) for observability.
     if (!DRY_RUN) {
@@ -994,7 +992,7 @@ async function main(): Promise<void> {
 }
 
 async function watchMode(): Promise<void> {
-  console.log("AltShortBot — watch mode (runs on the hour)");
+  console.log("AltShortBot: watch mode (runs on the hour)");
   while (true) {
     await main();
     const now = Date.now();
@@ -1011,8 +1009,8 @@ const __filename = fileURLToPath(import.meta.url);
 if (process.argv[1] === __filename) {
   const onCrash = async (e: unknown) => {
     const msg = e instanceof Error ? e.message : String(e);
-    console.error(`scanner crashed: ${msg}`);
-    await sendTelegram(`🚨 *altshortbot* — scanner crashed\n\`${msg}\``);
+    console.error(`Scanner crashed: ${msg}`);
+    await sendTelegram(`🚨 Scanner crashed\n\`${msg}\``);
     process.exit(1);
   };
   (process.argv.includes("--watch") ? watchMode() : main()).catch(onCrash);
