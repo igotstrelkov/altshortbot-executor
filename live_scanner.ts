@@ -45,7 +45,11 @@ import type { Alert, QueuedSignal } from "./shared_types.ts";
 // ~-21900% APR with +30-42% adverse runs; net loser on the universe backtest).
 // EDEN was removed from this list 2026-06-07: it backtested as a clean earner
 // (+5.2% equity over 60d, 6W/1L) and had no documented reason to be excluded.
-const EXCLUDE_COINS = new Set(["BTC", "ETH", "BNB", "BTCDOM", "FIDA"]);
+// H: mid-redenomination — priced ~2× apart on Bybit (scanner) vs KuCoin
+// (executor), so every Bybit signal mis-describes the KuCoin instrument. The
+// executors also hard-exclude H and guard on venue divergence; this stops it at
+// the source so it never alerts or queues.
+const EXCLUDE_COINS = new Set(["BTC", "ETH", "BNB", "BTCDOM", "FIDA", "H"]);
 
 // Sub-penny tokens have squeeze cycles longer than the 10h detection window
 // and produce unreliable exhaustion signals. Filter them out at discovery.

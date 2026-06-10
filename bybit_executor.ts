@@ -51,6 +51,17 @@ const RISK = {
   timeoutH: 24,
 } as const;
 
+// Coins never traded regardless of signal. H is mid-redenomination and prices
+// chaotically across venues (Bybit/KuCoin ~2× apart) — junk signals. Kept in
+// sync with the KuCoin executor's exclude list.
+const EXCLUDE_COINS = new Set(["H"]);
+
+// Staleness guard: the scanner and this executor are both on Bybit, so this
+// catches a price that ran away between the scan and execution (the signal's
+// `entry` no longer describes the live market). Same threshold as the KuCoin
+// executor's venue-agreement guard.
+const MAX_SIGNAL_DIVERGENCE = 0.15; // 15%
+
 const QUEUE_FILE = "signal_queue.json";
 const POSITIONS_FILE = "bybit_positions.json";
 const BB_BASE = "https://api.bybit.com";
@@ -510,11 +521,39 @@ async function executeSignal(
     return;
   }
 
+  // Hard exclude (e.g. H — redenomination chaos). Never trade these.
+  if (EXCLUDE_COINS.has(coin)) {
+    console.log(`  ${coin}: on executor exclude list — skipping`);
+    return;
+  }
+
   // Fetch instrument info — needed for precision and max leverage
   const instr = await fetchInstrumentInfo(coin);
   if (!instr) {
     console.log(
       `  ${coin}: not listed on Bybit or instrument info unavailable — skipping`,
+    );
+    return;
+  }
+
+  // Staleness guard. Confirm the live price still agrees with the signal's
+  // `entry` before trading — a large divergence means the price ran away since
+  // the scan and the signal no longer describes the live market.
+  const livePx = await fetchCurrentPrice(coin);
+  if (livePx === null) {
+    console.log(`  ${coin}: could not fetch live price — skipping`);
+    return;
+  }
+  const divergence = Math.abs(livePx - entry) / entry;
+  if (divergence > MAX_SIGNAL_DIVERGENCE) {
+    const pctStr = (divergence * 100).toFixed(0);
+    console.log(
+      `  ${coin}: signal $${entry.toFixed(6)} vs live $${livePx.toFixed(6)} ` +
+        `diverge ${pctStr}% (> ${(MAX_SIGNAL_DIVERGENCE * 100).toFixed(0)}%) — skipping`,
+    );
+    await sendTelegram(
+      `⚠️ *${coin}* skipped — signal $${entry.toFixed(6)} vs live $${livePx.toFixed(6)} ` +
+        `diverge ${pctStr}% (stale signal)`,
     );
     return;
   }

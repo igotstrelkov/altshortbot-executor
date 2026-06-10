@@ -22,9 +22,11 @@ import { existsSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 const BB_BASE = "https://api.bybit.com";
 const MIN_PRICE_USDC = 0.001;
 // FIDA excluded: extreme-funding BUILDINGs are mega-squeeze traps (net loser on
-// the backtest). EDEN removed 2026-06-07 — backtested as a clean earner. Must
-// stay in sync with live_scanner.ts EXCLUDE_COINS.
-const EXCLUDE = new Set(["BTC", "ETH", "BNB", "BTCDOM", "FIDA"]);
+// the backtest). EDEN removed 2026-06-07 — backtested as a clean earner. H
+// excluded: Bybit/KuCoin price split (redenomination) — Bybit signals don't
+// describe the KuCoin instrument we trade. Must stay in sync with
+// live_scanner.ts EXCLUDE_COINS.
+const EXCLUDE = new Set(["BTC", "ETH", "BNB", "BTCDOM", "FIDA", "H"]);
 
 const argDays = process.argv[process.argv.indexOf("--days") + 1];
 const DAYS = process.argv.includes("--days") ? parseInt(argDays) : 60;

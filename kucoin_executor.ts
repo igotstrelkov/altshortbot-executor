@@ -81,6 +81,20 @@ const RISK = {
 // goes through; see the round-up sizing decision).
 const RISK_NOTE_MULTIPLE = 1.5;
 
+// Coins never traded regardless of signal. H is priced ~2× apart on Bybit (the
+// scanner's venue) vs KuCoin (this executor's venue) due to a token
+// redenomination, so every Bybit signal mis-describes the KuCoin instrument —
+// see the venue-agreement guard below. The guard would also auto-skip it, but
+// an explicit exclude is a clear, immediate stop.
+const EXCLUDE_COINS = new Set(["H"]);
+
+// Venue-agreement / staleness guard: the signal's entry price comes from the
+// scanner's venue (Bybit); we trade KuCoin. If the live KuCoin price diverges
+// from the signal price by more than this fraction, the venues disagree (e.g. a
+// redenominated token) or the price ran away since the scan — either way the
+// signal does not describe what we'd trade, so the entry is skipped.
+const MAX_SIGNAL_DIVERGENCE = 0.15; // 15%
+
 const QUEUE_FILE = "signal_queue.json";
 const POSITIONS_FILE = "kucoin_positions.json";
 
@@ -832,6 +846,12 @@ async function executeSignal(
     return;
   }
 
+  // Hard exclude (e.g. H — Bybit/KuCoin price split). Never trade these.
+  if (EXCLUDE_COINS.has(coin)) {
+    console.log(`  ${coin}: on executor exclude list — skipping`);
+    return;
+  }
+
   // "Listed on KuCoin" check — the contract must be in the startup cache
   // (USDT-margined, status Open). This is the not-listed-on-KuCoin handling.
   const symbol = toKucoinSymbol(coin);
@@ -839,6 +859,29 @@ async function executeSignal(
   if (!spec) {
     console.log(
       `  ${coin}: not listed as a tradeable USDT perpetual on KuCoin — skipping`,
+    );
+    return;
+  }
+
+  // Venue-agreement / staleness guard. The signal's `entry` is the scanner's
+  // Bybit price; confirm the live KuCoin price agrees before trading. A large
+  // divergence means a cross-venue mismatch (redenomination) or a runaway move
+  // since the scan — the signal no longer describes what we'd trade.
+  const livePx = await fetchCurrentPrice(symbol);
+  if (livePx === null) {
+    console.log(`  ${coin}: could not fetch live KuCoin price — skipping`);
+    return;
+  }
+  const divergence = Math.abs(livePx - entry) / entry;
+  if (divergence > MAX_SIGNAL_DIVERGENCE) {
+    const pctStr = (divergence * 100).toFixed(0);
+    console.log(
+      `  ${coin}: signal $${entry.toFixed(6)} vs live KuCoin $${livePx.toFixed(6)} ` +
+        `diverge ${pctStr}% (> ${(MAX_SIGNAL_DIVERGENCE * 100).toFixed(0)}%) — skipping`,
+    );
+    await sendTelegram(
+      `⚠️ *${coin}* skipped — signal $${entry.toFixed(6)} vs live $${livePx.toFixed(6)} ` +
+        `diverge ${pctStr}% (venue mismatch / stale signal)`,
     );
     return;
   }
