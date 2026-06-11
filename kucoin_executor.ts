@@ -300,6 +300,13 @@ function toKucoinSymbol(coin: string): string {
   return `${base}USDTM`;
 }
 
+/** Reverse of toKucoinSymbol: XBTUSDTM → BTC, SOLUSDTM → SOL. "" if not a USDT perp. */
+function fromKucoinSymbol(symbol: string): string {
+  const base = symbol.replace(/USDTM$/, "");
+  if (!base || base === symbol) return ""; // not a {COIN}USDTM symbol
+  return base === "XBT" ? "BTC" : base;
+}
+
 /** Number of decimal places implied by a tick size (handles "1e-7" form). */
 function tickDecimals(tick: number): number {
   if (!Number.isFinite(tick) || tick <= 0) return 0;
@@ -734,6 +741,43 @@ async function fetchAvgEntryPrice(symbol: string): Promise<number | null> {
   return null;
 }
 
+// ─── Reconciliation ──────────────────────────────────────────────────────────
+/**
+ * Reconcile the local store against actual KuCoin positions. managePositions
+ * already handles the "exchange closed my tracked position" direction (qty → 0).
+ * The gap is the REVERSE — a position OPEN on KuCoin that the store does not
+ * track (an orphan from a crash mid-open or a failed close). The bot would
+ * never manage it (no stop watch, no timeout), so alert loudly. We do NOT
+ * auto-close: an untracked position might be intentional, and a wrong close is
+ * worse than a loud alert.
+ */
+async function reconcilePositions(store: KucoinPositionStore): Promise<void> {
+  if (IS_PAPER) return;
+  try {
+    const data = unwrap<any[]>(await client.getPositions(), "getPositions");
+    if (!data) return;
+    const tracked = new Set(Object.keys(store.open).map(toKucoinSymbol));
+    for (const p of data) {
+      if (p.isOpen === false) continue;
+      const qty = Number(p.currentQty ?? 0);
+      if (qty === 0) continue;
+      const sym = String(p.symbol ?? "");
+      if (tracked.has(sym)) continue;
+      const coin = fromKucoinSymbol(sym) || sym;
+      const avg = Number(p.avgEntryPrice);
+      const entryStr = Number.isFinite(avg) ? `, entry ~$${avg}` : "";
+      const msg =
+        `🚨 *altshortbot* — UNTRACKED *${coin}* position on KuCoin ` +
+        `(qty ${qty}${entryStr}). The bot is NOT managing it — set a stop or ` +
+        `close it manually on kucoin.com.`;
+      console.error(`[RECONCILE] ${coin}: untracked position qty ${qty}`);
+      await sendTelegram(msg);
+    }
+  } catch (e) {
+    await alertError("reconcilePositions", e);
+  }
+}
+
 // ─── Position management ───────────────────────────────────────────────────────
 async function managePositions(store: KucoinPositionStore): Promise<void> {
   const nowMs = Date.now();
@@ -880,12 +924,20 @@ async function executeSignal(
   }
 
   // "Listed on KuCoin" check — the contract must be in the startup cache
-  // (USDT-margined, status Open). This is the not-listed-on-KuCoin handling.
+  // (USDT-margined, status Open). Coins NOT on KuCoin are traded MANUALLY on
+  // Bybit, so instead of silently skipping, surface an actionable ticket. The
+  // signal's `entry` IS the Bybit price (the scanner runs on Bybit), so the
+  // entry + 15% stop are accurate for a manual Bybit order.
   const symbol = toKucoinSymbol(coin);
   const spec = contractCache.get(symbol);
   if (!spec) {
-    console.log(
-      `  ${coin}: not listed as a tradeable USDT perpetual on KuCoin — skipping`,
+    const manualStop = entry * (1 + RISK.stopLossPct);
+    console.log(`  ${coin}: not on KuCoin — manual Bybit alert sent`);
+    await sendTelegram(
+      `🟡 *${coin}* ${signalType} — not on KuCoin, *place manually on Bybit*\n` +
+        `Entry: $${entry.toFixed(6)} | Stop: $${manualStop.toFixed(6)} ` +
+        `(+${(RISK.stopLossPct * 100).toFixed(0)}%)\n` +
+        `Funding: ${fundingApr.toFixed(0)}% APR | ${confidence}`,
     );
     return;
   }
@@ -1065,6 +1117,11 @@ async function main(): Promise<void> {
     }
     savePositions(store);
   }
+
+  // ── Reconcile against the exchange — catch untracked (orphan) positions ──────
+  // Runs every cycle (not just when the store has positions): the whole point is
+  // to find positions the store does NOT know about.
+  await reconcilePositions(store);
 
   // ── Execute queued signals ──────────────────────────────────────────────────
   const queue = loadQueue();
