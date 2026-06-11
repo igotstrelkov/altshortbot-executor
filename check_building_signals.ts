@@ -144,6 +144,23 @@ async function fetchAllKlines(
 // ── Realized outcome under the executor's rules (15% stop, 24h timeout) ───────
 const STOP_PCT = 15;
 const TIMEOUT_H = 24;
+// Cap the funding RATE used in the cost estimate. The scanner's fundingApr
+// annualizes a possibly-momentary, possibly-cross-venue extreme (e.g. -21900%);
+// the rate actually PAID is clamped per settlement (~2%/8h on the exchange).
+// Without this cap a -21900% coin shows ~-60% funding over 24h — nonsense. This
+// keeps the estimate a realistic upper bound. The executor's fundingPaidUsdt is
+// the exact figure for real trades.
+const FUNDING_CAP_PER_8H = 0.02; // 2% per 8h settlement
+const SETTLEMENTS_PER_YEAR = 365 * 3; // 8h funding
+
+/** Est funding drag over a hold (%, negative = paid), with the per-8h rate capped. */
+function estFundingPct(fundingApr: number, holdH: number): number {
+  const ratePer8h = Math.max(
+    -FUNDING_CAP_PER_8H,
+    Math.min(FUNDING_CAP_PER_8H, fundingApr / 100 / SETTLEMENTS_PER_YEAR),
+  );
+  return ratePer8h * (holdH / 8) * 100;
+}
 
 interface Realized {
   realizedPct: number; // P&L modelling the stop + timeout (1x, %)
@@ -197,17 +214,15 @@ function realizedOutcome(
     exit = "open";
     holdH = ageH;
   }
-  // est funding: signal funding held flat over the hold (rough — funding varies
-  // and is clamped; the executor's fundingPaidUsdt is the exact figure).
-  const estFundingPct = fundingApr * (holdH / 8760);
+  const fundingDrag = estFundingPct(fundingApr, holdH);
   return {
     realizedPct,
     exit,
     maePct,
     mfePct,
     holdH,
-    estFundingPct,
-    netPct: realizedPct + estFundingPct,
+    estFundingPct: fundingDrag,
+    netPct: realizedPct + fundingDrag,
   };
 }
 
@@ -418,10 +433,15 @@ async function main() {
       `model: ${STOP_PCT}% stop, ${TIMEOUT_H}h timeout (Bybit klines)`,
   );
 
-  // Score EVERY signal (cooldown history needs the full timeline), then display.
-  const coins = Array.from(new Set(signals.map((s) => s.coin)));
+  // Score signals, then display. In active-only mode, limit scoring to the
+  // display window plus a 48h pre-roll (cooldown 24h + max hold 24h) so the
+  // cooldown flag stays correct without fetching klines for the entire log.
+  const PREROLL_MS = 48 * 3_600_000;
+  const scoreCutoff = SHOW_ALL ? -Infinity : now - (window + PREROLL_MS);
+  const relevant = signals.filter((s) => s.firedAtMs >= scoreCutoff);
+  const coins = Array.from(new Set(relevant.map((s) => s.coin)));
   const klines = await fetchAllKlines(coins);
-  const scoredAll: Scored[] = signals.map((sig) => ({
+  const scoredAll: Scored[] = relevant.map((sig) => ({
     sig,
     r: realizedOutcome(
       sig.entry,
@@ -444,7 +464,8 @@ async function main() {
   console.log(
     `\n  Realized = modelled with the executor's stop + timeout (not raw ` +
       `entry→now). MAE = peak adverse, MFE = peak favorable. 'net' = realized + ` +
-      `est funding. 🔁 = the 24h re-entry cooldown would skip it.`,
+      `est funding (rate capped at ${(FUNDING_CAP_PER_8H * 100).toFixed(0)}%/8h, ` +
+      `an upper bound; exact = executor's fundingPaidUsdt). 🔁 = 24h cooldown skips it.`,
   );
   console.log();
 }
