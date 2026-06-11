@@ -95,22 +95,120 @@ function loadSignals(): BuildingSignal[] {
     .map((l) => JSON.parse(l) as BuildingSignal);
 }
 
-// ── Bybit price fetch ─────────────────────────────────────────────────────────
-async function fetchMarkPrices(coins: string[]): Promise<Map<string, number>> {
-  const map = new Map<string, number>();
+// ── Bybit hourly kline path (for realized stop/timeout modelling) ─────────────
+interface OHLC {
+  h: number;
+  l: number;
+  c: number;
+}
+
+async function fetchKlinePath(coin: string): Promise<Map<number, OHLC>> {
+  const m = new Map<number, OHLC>();
   try {
-    const res = await fetch(`${BB_BASE}/v5/market/tickers?category=linear`);
-    const data = (await res.json()) as {
-      result?: { list?: { symbol: string; lastPrice: string }[] };
-    };
-    for (const t of data?.result?.list ?? []) {
-      const coin = t.symbol.replace("USDT", "");
-      if (coins.includes(coin)) map.set(coin, parseFloat(t.lastPrice));
+    const res = await fetch(
+      `${BB_BASE}/v5/market/kline?category=linear&symbol=${coin}USDT&interval=60&limit=1000`,
+    );
+    const data = (await res.json()) as { result?: { list?: string[][] } };
+    for (const r of data?.result?.list ?? []) {
+      // [start, open, high, low, close, volume, turnover]
+      const hour = Math.floor(parseInt(r[0]) / 3_600_000) * 3_600_000;
+      m.set(hour, {
+        h: parseFloat(r[2]),
+        l: parseFloat(r[3]),
+        c: parseFloat(r[4]),
+      });
     }
-  } catch (e) {
-    console.error("  Price fetch failed:", (e as Error).message);
+  } catch {
+    /* empty → realized shows n/a */
   }
-  return map;
+  return m;
+}
+
+// Fetch klines for all coins, ~10 at a time (one 1000-bar call covers ~41 days,
+// enough for any signal's 24h window unless it fired >40 days ago).
+async function fetchAllKlines(
+  coins: string[],
+): Promise<Map<string, Map<number, OHLC>>> {
+  const out = new Map<string, Map<number, OHLC>>();
+  const CHUNK = 10;
+  for (let i = 0; i < coins.length; i += CHUNK) {
+    const chunk = coins.slice(i, i + CHUNK);
+    const res = await Promise.all(
+      chunk.map(async (c) => [c, await fetchKlinePath(c)] as const),
+    );
+    for (const [c, p] of res) out.set(c, p);
+  }
+  return out;
+}
+
+// ── Realized outcome under the executor's rules (15% stop, 24h timeout) ───────
+const STOP_PCT = 15;
+const TIMEOUT_H = 24;
+
+interface Realized {
+  realizedPct: number; // P&L modelling the stop + timeout (1x, %)
+  exit: "stop" | "timeout" | "open";
+  maePct: number; // peak adverse (price up = bad for short) over the window
+  mfePct: number; // peak favorable (price down = good) over the window
+  holdH: number; // hours held to stop / timeout / now
+  estFundingPct: number; // est funding drag over the hold (%, negative = paid)
+  netPct: number; // realized + funding (1x, %)
+}
+
+function realizedOutcome(
+  entry: number,
+  firedAtMs: number,
+  fundingApr: number,
+  path: Map<number, OHLC>,
+  nowMs: number,
+): Realized | null {
+  const stopPx = entry * (1 + STOP_PCT / 100);
+  const ageH = (nowMs - firedAtMs) / 3_600_000;
+  const endMs = Math.min(firedAtMs + TIMEOUT_H * 3_600_000, nowMs);
+  let maxHigh = entry,
+    minLow = entry,
+    lastClose = entry,
+    have = false;
+  let stopMs: number | null = null;
+  const start = Math.floor(firedAtMs / 3_600_000) * 3_600_000;
+  for (let t = start; t <= endMs; t += 3_600_000) {
+    const o = path.get(t);
+    if (!o) continue;
+    have = true;
+    if (o.h > maxHigh) maxHigh = o.h;
+    if (o.l < minLow) minLow = o.l;
+    lastClose = o.c;
+    if (stopMs === null && o.h >= stopPx) stopMs = t;
+  }
+  if (!have) return null;
+  const maePct = ((maxHigh - entry) / entry) * 100;
+  const mfePct = ((entry - minLow) / entry) * 100;
+  let realizedPct: number, exit: Realized["exit"], holdH: number;
+  if (stopMs !== null) {
+    realizedPct = -STOP_PCT;
+    exit = "stop";
+    holdH = (stopMs - firedAtMs) / 3_600_000;
+  } else if (ageH >= TIMEOUT_H) {
+    realizedPct = ((entry - lastClose) / entry) * 100;
+    exit = "timeout";
+    holdH = TIMEOUT_H;
+  } else {
+    realizedPct = ((entry - lastClose) / entry) * 100;
+    exit = "open";
+    holdH = ageH;
+  }
+  // est funding: signal funding held flat over the hold (rough — funding varies
+  // and is clamped; the executor's fundingPaidUsdt is the exact figure).
+  const estFundingPct = fundingApr * (holdH / 8760);
+  return {
+    realizedPct,
+    exit,
+    maePct,
+    mfePct,
+    holdH,
+    estFundingPct,
+    netPct: realizedPct + estFundingPct,
+  };
 }
 
 // ── Formatting helpers ────────────────────────────────────────────────────────
@@ -130,40 +228,156 @@ function fmtPrice(n: number): string {
 // ── Table row ─────────────────────────────────────────────────────────────────
 function row(
   coin: string,
-  time: string,
   age: string,
   entry: string,
-  now: string,
-  pnl: string,
-  pnl3x: string,
+  real: string,
+  real3x: string,
+  net3x: string,
+  mae: string,
+  mfe: string,
+  exit: string,
   funding: string,
   icon: string,
 ): string {
   return [
-    pad(coin, 10),
-    pad(time, 9, true),
-    pad(age, 10, true),
+    pad(coin, 9),
+    pad(age, 9, true),
     pad(entry, 10, true),
-    pad(now, 10, true),
-    pad(pnl, 9, true),
-    pad(pnl3x, 9, true),
-    pad(funding, 12, true),
+    pad(real, 9, true),
+    pad(real3x, 9, true),
+    pad(net3x, 9, true),
+    pad(mae, 7, true),
+    pad(mfe, 7, true),
+    pad(exit, 8, true),
+    pad(funding, 9, true),
     " " + icon,
   ].join(" ");
 }
 
 const HEADER = row(
   "Coin",
-  "Fired",
   "Age",
   "Entry",
-  "Now",
-  "P&L",
-  "At 3x",
+  "Realized",
+  "@3x",
+  "Net@3x",
+  "MAE",
+  "MFE",
+  "Exit",
   "Funding",
   "",
 );
 const DIVIDER = "─".repeat(HEADER.length);
+
+// Per-signal record after realized modelling (null klines → no data).
+interface Scored {
+  sig: BuildingSignal;
+  r: Realized | null;
+  cooldownBlocked: boolean;
+}
+
+// Flag signals the 24h re-entry cooldown would block: a same-coin STOP closed
+// within reentryCooldownH before this signal fired. Chronological over ALL
+// signals so cross-section history is respected.
+function markCooldown(scored: Scored[]): void {
+  const COOLDOWN_H = 24;
+  const lastStopMs = new Map<string, number>();
+  const byTime = [...scored].sort(
+    (a, b) => a.sig.firedAtMs - b.sig.firedAtMs,
+  );
+  for (const x of byTime) {
+    const last = lastStopMs.get(x.sig.coin);
+    if (last != null && x.sig.firedAtMs - last < COOLDOWN_H * 3_600_000) {
+      x.cooldownBlocked = true;
+    }
+    if (x.r?.exit === "stop") {
+      lastStopMs.set(x.sig.coin, x.sig.firedAtMs + x.r.holdH * 3_600_000);
+    }
+  }
+}
+
+function printSection(title: string, scored: Scored[]): void {
+  console.log(`\n${title} (${scored.length})`);
+  console.log(HEADER);
+  console.log(DIVIDER);
+
+  let nReal = 0,
+    wins = 0,
+    sumReal = 0,
+    sumNet = 0,
+    sumMae = 0,
+    sumFund = 0,
+    stops = 0,
+    timeouts = 0,
+    open = 0,
+    blocked = 0;
+
+  for (const { sig, r, cooldownBlocked } of scored) {
+    const age = fmtAge(Date.now() - sig.firedAtMs);
+    if (cooldownBlocked) blocked++;
+    if (!r) {
+      console.log(
+        row(
+          sig.coin,
+          age,
+          fmtPrice(sig.entry),
+          "n/a",
+          "n/a",
+          "n/a",
+          "n/a",
+          "n/a",
+          "no-data",
+          sig.fundingApr.toFixed(0) + "%",
+          "—",
+        ),
+      );
+      continue;
+    }
+    nReal++;
+    if (r.realizedPct > 0) wins++;
+    sumReal += r.realizedPct;
+    sumNet += r.netPct;
+    sumMae += r.maePct;
+    sumFund += r.estFundingPct;
+    if (r.exit === "stop") stops++;
+    else if (r.exit === "timeout") timeouts++;
+    else open++;
+
+    const icon =
+      (r.realizedPct > 2 ? "✅" : r.realizedPct < -3 ? "❌" : "😐") +
+      (cooldownBlocked ? "🔁" : "");
+    console.log(
+      row(
+        sig.coin,
+        age,
+        fmtPrice(sig.entry),
+        fmtPct(r.realizedPct),
+        fmtPct(r.realizedPct * 3),
+        fmtPct(r.netPct * 3),
+        "+" + r.maePct.toFixed(1) + "%",
+        "+" + r.mfePct.toFixed(1) + "%",
+        r.exit,
+        sig.fundingApr.toFixed(0) + "%",
+        icon,
+      ),
+    );
+  }
+
+  if (nReal > 0) {
+    console.log(DIVIDER);
+    console.log(
+      `  ${wins}/${nReal} win  |  realized avg ${fmtPct(sumReal / nReal)} ` +
+        `(${fmtPct((sumReal / nReal) * 3)} @3x)  |  exits: ${stops} stop / ` +
+        `${timeouts} timeout / ${open} open`,
+    );
+    console.log(
+      `  avg MAE +${(sumMae / nReal).toFixed(1)}%  |  ` +
+        `est funding drag ${fmtPct(sumFund / nReal)}  |  ` +
+        `net avg ${fmtPct(sumNet / nReal)} (${fmtPct((sumNet / nReal) * 3)} @3x)` +
+        (blocked ? `  |  ${blocked} cooldown-blocked 🔁` : ""),
+    );
+  }
+}
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 async function main() {
@@ -189,146 +403,49 @@ async function main() {
 
   const now = Date.now();
   const window = LOOKAHEAD_H * 3_600_000;
-
-  const active = signals.filter((s) => now - s.firedAtMs < window);
-  const expired = signals.filter((s) => now - s.firedAtMs >= window);
-  const toShow = SHOW_ALL ? signals : active;
+  const toShow = SHOW_ALL
+    ? signals
+    : signals.filter((s) => now - s.firedAtMs < window);
 
   if (!toShow.length) {
     console.log(`No ${SHOW_ALL ? "" : `active (<${LOOKAHEAD_H}h) `}signals.`);
     return;
   }
 
-  const coins = Array.from(new Set(toShow.map((s) => s.coin)));
-  const markPrices = await fetchMarkPrices(coins);
-
-  console.log(`\nStrategy B — BUILDING Signal Monitor`);
+  console.log(`\nStrategy B — BUILDING Signal Monitor (REALIZED)`);
   console.log(
-    `${new Date().toISOString()}  |  window: ${LOOKAHEAD_H}h  |  prices: Bybit`,
+    `${new Date().toISOString()}  |  window: ${LOOKAHEAD_H}h  |  ` +
+      `model: ${STOP_PCT}% stop, ${TIMEOUT_H}h timeout (Bybit klines)`,
   );
 
-  // Active
-  if (active.length) {
-    console.log(`\nActive (${active.length})`);
-    console.log(HEADER);
-    console.log(DIVIDER);
+  // Score EVERY signal (cooldown history needs the full timeline), then display.
+  const coins = Array.from(new Set(signals.map((s) => s.coin)));
+  const klines = await fetchAllKlines(coins);
+  const scoredAll: Scored[] = signals.map((sig) => ({
+    sig,
+    r: realizedOutcome(
+      sig.entry,
+      sig.firedAtMs,
+      sig.fundingApr,
+      klines.get(sig.coin) ?? new Map(),
+      now,
+    ),
+    cooldownBlocked: false,
+  }));
+  markCooldown(scoredAll);
 
-    let totalPnl = 0,
-      wins = 0,
-      confirmed = 0;
+  const active = scoredAll.filter((x) => now - x.sig.firedAtMs < window);
+  const expired = scoredAll.filter((x) => now - x.sig.firedAtMs >= window);
 
-    for (const s of active) {
-      const age = fmtAge(now - s.firedAtMs);
-      const time = s.firedAt.slice(11, 16) + "Z";
-      const current = markPrices.get(s.coin);
+  if (active.length) printSection("Active", active);
+  if (SHOW_ALL && expired.length)
+    printSection(`Expired (>${LOOKAHEAD_H}h)`, expired);
 
-      if (!current) {
-        console.log(
-          row(
-            s.coin,
-            time,
-            age,
-            fmtPrice(s.entry),
-            "n/a",
-            "?",
-            "?",
-            s.fundingApr.toFixed(0) + "%",
-            "⏳",
-          ),
-        );
-        continue;
-      }
-
-      confirmed++;
-      const pnl = ((s.entry - current) / s.entry) * 100;
-      const pnl3x = pnl * 3;
-      const icon = pnl > 2 ? "✅" : pnl < -3 ? "❌" : "😐";
-      if (pnl > 0) wins++;
-      totalPnl += pnl;
-
-      console.log(
-        row(
-          s.coin,
-          time,
-          age,
-          fmtPrice(s.entry),
-          fmtPrice(current),
-          fmtPct(pnl),
-          fmtPct(pnl3x),
-          s.fundingApr.toFixed(0) + "%",
-          icon,
-        ),
-      );
-    }
-
-    if (confirmed > 0) {
-      console.log(DIVIDER);
-      const avg = totalPnl / confirmed;
-      console.log(
-        `  ${wins}/${confirmed} winning` +
-          `  |  avg: ${fmtPct(avg)}` +
-          `  |  avg at 3x: ${fmtPct(avg * 3)}`,
-      );
-    }
-  }
-
-  // Expired
-  if (SHOW_ALL && expired.length) {
-    console.log(`\nExpired (>${LOOKAHEAD_H}h) — ${expired.length}`);
-    console.log(HEADER);
-    console.log(DIVIDER);
-
-    let totalPnl = 0,
-      wins = 0,
-      confirmed = 0;
-    for (const s of expired) {
-      const age = fmtAge(now - s.firedAtMs);
-      const time = s.firedAt.slice(11, 16) + "Z";
-      const current = markPrices.get(s.coin);
-      if (!current) {
-        console.log(
-          row(
-            s.coin,
-            time,
-            age,
-            fmtPrice(s.entry),
-            "n/a",
-            "?",
-            "?",
-            s.fundingApr.toFixed(0) + "%",
-            "—",
-          ),
-        );
-        continue;
-      }
-      confirmed++;
-      const pnl = ((s.entry - current) / s.entry) * 100;
-      const pnl3x = pnl * 3;
-      if (pnl > 0) wins++;
-      totalPnl += pnl;
-      console.log(
-        row(
-          s.coin,
-          time,
-          age,
-          fmtPrice(s.entry),
-          fmtPrice(current),
-          fmtPct(pnl),
-          fmtPct(pnl3x),
-          s.fundingApr.toFixed(0) + "%",
-          pnl > 0 ? "✅" : "❌",
-        ),
-      );
-    }
-    if (confirmed > 0) {
-      console.log(DIVIDER);
-      const avg = totalPnl / confirmed;
-      console.log(
-        `  ${wins}/${confirmed} winning  |  avg: ${fmtPct(avg)}  |  avg at 3x: ${fmtPct(avg * 3)}`,
-      );
-    }
-  }
-
+  console.log(
+    `\n  Realized = modelled with the executor's stop + timeout (not raw ` +
+      `entry→now). MAE = peak adverse, MFE = peak favorable. 'net' = realized + ` +
+      `est funding. 🔁 = the 24h re-entry cooldown would skip it.`,
+  );
   console.log();
 }
 
