@@ -32,6 +32,11 @@ import type { PaperTrade } from "./shared_types.ts";
 const STOP_LOSS_PCT = 0.15; // 1R = stopLossPct × notional
 const KC_OK = "200000";
 
+// check_building_signals.ts caps modeled funding at this rate per 8h settlement
+// (FUNDING_CAP_PER_8H = 0.02). This tool measures the REALIZED rate so the cap
+// can be validated: if realized |rate| routinely exceeds it, the cap under-states.
+const CAP_PER_8H_PCT = 2.0;
+
 // ─── CLI ────────────────────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
 const VERBOSE = argv.includes("--verbose");
@@ -123,6 +128,9 @@ interface Enriched {
   fundingUsdt: number | null; // null = fetch failed
   fundingR: number; // 0 when null (excluded from funding sums via fundingUsdt check)
   totalR: number; // priceR + fundingR (priceR only when funding null)
+  // Realized funding rate normalized to %/8h (negative = paid). The figure to
+  // compare against check_building_signals' 2%/8h cap. null when no funding data.
+  fundRate8hPct: number | null;
 }
 
 let refetched = 0;
@@ -146,6 +154,12 @@ for (const t of trades) {
   }
   const fundingR =
     fundingUsdt != null && riskUsdt > 0 ? fundingUsdt / riskUsdt : 0;
+  // Realized funding as a fraction of notional, normalized to a per-8h rate.
+  const holdH = (t.closedAt - t.openedAt) / 3_600_000;
+  const fundRate8hPct =
+    fundingUsdt != null && notional > 0 && holdH > 0
+      ? (fundingUsdt / notional) * (8 / holdH) * 100
+      : null;
   rows.push({
     t,
     riskUsdt,
@@ -153,6 +167,7 @@ for (const t of trades) {
     fundingUsdt,
     fundingR,
     totalR: priceR + fundingR,
+    fundRate8hPct,
   });
 }
 
@@ -221,6 +236,44 @@ console.log(
   "Funding negative = paid (a cost for shorts on negative funding). totalR = priceR + fundingR.",
 );
 
+// ─── Realized funding rate vs the 2%/8h cap ────────────────────────────────────────
+// check_building_signals.ts clamps modeled funding to CAP_PER_8H_PCT. Measure the
+// realized rate to see whether that cap is realistic or under-states the drag.
+const rated = rows.filter(
+  (r): r is Enriched & { fundRate8hPct: number } => r.fundRate8hPct != null,
+);
+if (rated.length) {
+  const median = (xs: number[]) => {
+    const a = [...xs].sort((x, y) => x - y);
+    const m = Math.floor(a.length / 2);
+    return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+  };
+  // Magnitude of the funding rate (paid), %/8h — what the cap clamps.
+  const mags = rated.map((r) => Math.abs(r.fundRate8hPct));
+  const exceed = rated.filter((r) => Math.abs(r.fundRate8hPct) > CAP_PER_8H_PCT);
+  const worst = rated.reduce((a, b) =>
+    Math.abs(b.fundRate8hPct) > Math.abs(a.fundRate8hPct) ? b : a,
+  );
+  console.log("\n" + "─".repeat(72));
+  console.log(`  REALIZED FUNDING RATE vs ${CAP_PER_8H_PCT}%/8h cap (check_building_signals)`);
+  console.log("─".repeat(72));
+  console.log(
+    `  trades w/ funding: ${rated.length}  |  ` +
+      `exceed cap: ${exceed.length} (${((100 * exceed.length) / rated.length).toFixed(0)}%)`,
+  );
+  console.log(
+    `  realized |rate| %/8h:  median ${median(mags).toFixed(2)}  ` +
+      `mean ${(mags.reduce((s, x) => s + x, 0) / mags.length).toFixed(2)}  ` +
+      `max ${Math.max(...mags).toFixed(2)} (${worst.t.coin})`,
+  );
+  console.log(
+    `\n  Read: if a large share exceed ${CAP_PER_8H_PCT}%/8h, the cap UNDER-states funding for\n` +
+      `  extreme coins — raise/remove it and align analyze_stops/simulate_portfolio.\n` +
+      `  If realized clusters at/below the cap, the cap is fine and the uncapped\n` +
+      `  backtest model overstates. (KuCoin venue; one venue, real fills.)`,
+  );
+}
+
 // ─── Per-trade detail ────────────────────────────────────────────────────────────
 if (VERBOSE) {
   console.log("\nPer-trade (sorted by funding drag):");
@@ -228,10 +281,15 @@ if (VERBOSE) {
     (a, b) => (a.fundingUsdt ?? 0) - (b.fundingUsdt ?? 0),
   );
   console.log(
-    "DATE        COIN       TYPE        reason    priceR   fundR  totalR    $fund",
+    "DATE        COIN       TYPE        reason    priceR   fundR  totalR    $fund   %/8h",
   );
   for (const r of sorted) {
     const d = new Date(r.t.closedAt).toISOString().slice(0, 10);
+    const rate =
+      r.fundRate8hPct == null
+        ? "n/a"
+        : (r.fundRate8hPct >= 0 ? "+" : "") + r.fundRate8hPct.toFixed(2);
+    const overCap = r.fundRate8hPct != null && Math.abs(r.fundRate8hPct) > CAP_PER_8H_PCT;
     console.log(
       d +
         "  " +
@@ -247,7 +305,10 @@ if (VERBOSE) {
         "  " +
         fmtR(r.totalR).padStart(6) +
         "  " +
-        (r.fundingUsdt == null ? "n/a" : fmtUsd(r.fundingUsdt)).padStart(8),
+        (r.fundingUsdt == null ? "n/a" : fmtUsd(r.fundingUsdt)).padStart(8) +
+        "  " +
+        rate.padStart(6) +
+        (overCap ? " ⚠️" : ""),
     );
   }
 }
