@@ -770,6 +770,48 @@ async function fetchFundingPaid(
   }
 }
 
+/**
+ * Actual exchange close price for the position on `symbol`, read from KuCoin's
+ * closed-position history. The live close path otherwise records the poll-time
+ * price (currentPx); when a stop fires on an intraday spike that retraces before
+ * the next 5-min poll, currentPx UNDER-states the loss (a "stop" can look like
+ * −0.5R when it really filled at the −1R stop level). This returns the real fill
+ * so pnl/R/MAE match reality. We just triggered this position's close, so the
+ * most recent close for the symbol is ours — no fragile timestamp-unit math.
+ * Retries because a just-issued timeout market-close can lag in history.
+ * Returns null on failure; the caller keeps currentPx as the fallback.
+ */
+async function fetchActualClosePrice(
+  symbol: string,
+  openedAtMs: number,
+): Promise<number | null> {
+  if (IS_PAPER) return null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const data = unwrap<{ items?: { closePrice?: string; closeTime?: number }[] }>(
+        await client.getHistoryPositions({ symbol, from: openedAtMs }),
+        `getHistoryPositions(${symbol})`,
+      );
+      let bestPx: number | null = null;
+      let bestT = -1;
+      for (const it of data?.items ?? []) {
+        const px = Number(it.closePrice);
+        const t = Number(it.closeTime);
+        if (!Number.isFinite(px) || px <= 0) continue;
+        if (t >= bestT) {
+          bestT = t;
+          bestPx = px;
+        }
+      }
+      if (bestPx !== null) return bestPx;
+    } catch {
+      /* transient — retry */
+    }
+    await sleep(500);
+  }
+  return null;
+}
+
 // ─── Reconciliation ──────────────────────────────────────────────────────────
 /**
  * Reconcile the local store against actual KuCoin positions. managePositions
@@ -867,6 +909,15 @@ async function managePositions(store: KucoinPositionStore): Promise<void> {
     }
 
     if (closeReason) {
+      // Anchor the close to the ACTUAL exchange fill, not the poll-time price.
+      // A stop can fire on an intraday spike that retraces before the next 5-min
+      // poll, so currentPx understates the loss; the real fill makes pnl/R/MAE
+      // exact. Falls back to currentPx (already set) if history is unavailable.
+      if (!IS_PAPER) {
+        const actualClose = await fetchActualClosePrice(symbol, pos.openedAt);
+        if (actualClose !== null) closePx = actualClose;
+      }
+
       const finalPnlPct = ((pos.entryPx - closePx) / pos.entryPx) * 100;
       const finalPnlUsdt = (finalPnlPct / 100) * pos.notionalUsdc;
 
