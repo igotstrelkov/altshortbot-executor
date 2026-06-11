@@ -42,6 +42,44 @@ All four numbers are from **one** 60-day window — the modelled ~-11% drawdown 
 floor on bad, not a worst case. A worse correlated cluster (many squeeze shorts hit by one
 broad alt selloff) goes deeper.
 
+## Executor entry safety (2026-06-11)
+
+Three executor-layer fixes from investigating a live **H** liquidation. The scanner detects on
+**Bybit**; the executor trades **KuCoin** — that split is the root of two of these.
+
+- **Fill-anchored stops & sizing.** The stop, recorded entry, and notional originally used the
+  scanner's _signal_ price. When the market moved between scan and fill, the stop could land
+  beyond the liquidation point — H filled 53% from signal, stop stranded above liquidation,
+  position liquidated instead of stopping out. Fix: after the market entry fills, read the
+  actual average fill (`avgEntryPrice` on KuCoin / `avgPrice` on Bybit) and derive stop +
+  bookkeeping from THAT. If the fill can't be read or the stop is rejected, the entry is
+  immediately closed rather than left unprotected (close-if-unprotected). Confirmed live: H
+  later filled at 0.087, stop at 0.0999 (+15%), stopped out at −13% instead of liquidating.
+- **Venue-agreement guard + `EXCLUDE_COINS`.** `H` is priced ~2× apart on Bybit (0.19) vs
+  KuCoin (0.099) — a token redenomination that hit one venue, confirmed live. Every Bybit
+  signal therefore mis-describes the KuCoin instrument. `H` is now hard-excluded (scanner,
+  universe runner, both executors). Generic guard: before ordering, the executor compares the
+  live trading-venue price to the signal's entry and skips on >15% divergence
+  (`MAX_SIGNAL_DIVERGENCE`) — catches cross-venue mismatches and genuine staleness; logs a
+  Telegram ⚠️ so the threshold can be tuned. A useful side effect: it bounds the signal-price
+  sizing error to <15%.
+- **`reentryCooldownH 24`** — after a coin stops out, do not re-short it for 24h. Live logs
+  showed serial re-stacking into a still-squeezing coin (HOME re-opened 7 min after an −$82
+  stop), a net loser. Universe sim (60d, H-excluded) full-window at 24h: return +571%→+715%,
+  max drawdown −49%→−23%, win rate 70%→73%. BUT the out-of-sample split (`simulate_portfolio.ts
+  --split`) shows the benefit is **regime-dependent**: the high-drawdown first half halves DD
+  and lifts return; the benign second half _loses_ return (343%→244%) with no DD to save. It
+  is therefore **drawdown insurance**, adopted deliberately to prioritise not blowing up,
+  accepting lower return in favourable regimes — not a free edge. 24h chosen over 48h/72h: it
+  captures most of the DD protection and aligns with `timeoutH`.
+
+**Rejected here (same investigation), on the data:** a runaway-funding ceiling (skip BUILDING
+at clamp-level funding) and a squeeze-stall delayed entry (wait for the squeeze to top before
+shorting). Both only cost return — with a correctly-anchored stop every trade is already
+bounded at ~1R, so entry/queue filters only remove net-positive trades. The lesson:
+enter-immediately + stop + timeout is the edge; the cooldown works only because it removes a
+genuinely net-negative subset (re-stacks), not because it filters signal quality.
+
 ## EXHAUSTION suspension — full rationale
 
 EXHAUSTION signals still detect and fire Telegram alerts but are **not queued** for the

@@ -22,7 +22,8 @@ _(unverified)_. The executor previously targeted Hyperliquid — see `HISTORY.md
 
 ## Current risk configuration
 
-Live `RISK` block in `bybit_executor.ts`. Rationale: `HISTORY.md` → Risk parameter rationale.
+`RISK` block (shape shared by both executors; KuCoin is the live venue — see note below).
+Rationale: `HISTORY.md` → Risk parameter rationale + Executor entry safety.
 
 ```typescript
 const RISK = {
@@ -31,8 +32,13 @@ const RISK = {
   stopLossPct: 0.15, // 15% stop loss
   maxPositions: 10, // max concurrent open positions
   timeoutH: 24, // close after 24h regardless (validated 2026-05-28)
+  reentryCooldownH: 24, // no re-short of a coin for 24h after it stops out
 } as const;
 ```
+
+> KuCoin is the live venue (`kucoin_executor.ts`); its block uses `riskPerTrade 0.05`,
+> `maxPositions 5`. `bybit_executor.ts` mirrors the structure with `0.03` / `10`. The
+> `stopLossPct`, `timeoutH`, and `reentryCooldownH` values match across both.
 
 **Exits — only two.** A short closes on **stop** (price rose `stopLossPct` above entry) or
 **timeout** (24h elapsed, closed at live price). There is **no take-profit and no trailing
@@ -42,6 +48,13 @@ tooling MUST model this two-exit behaviour.
 **Sizing — risk-based:** `riskUsdt = equity * riskPerTrade`; `notional = riskUsdt /
 stopLossPct`. A stop-out always costs exactly 1R (3% of equity); stop width does not change
 dollar risk per trade.
+
+**Entry gates (executor, pre-order).** Before opening, the executor skips a signal when:
+the coin is on `EXCLUDE_COINS` (e.g. `H` — Bybit-scanner vs KuCoin-executor price split from
+a redenomination); the live trading-venue price diverges >15% from the signal's entry
+(`MAX_SIGNAL_DIVERGENCE` — venue mismatch or stale signal); or the coin stopped out within
+`reentryCooldownH`. **Stop, entry, and sizing anchor to the actual fill price, not the
+scanner's signal price.** Rationale + backtests: `HISTORY.md` → Executor entry safety.
 
 ## Common commands
 
