@@ -52,7 +52,12 @@ interface QueuedDetail {
   minPct: number; // peak favorable excursion — price low below entry (good for short)
   verdict: string;
   trendingAtFire?: boolean;
+  // Hours-from-entry the price first crossed each stop width (keyed by stop %),
+  // null if never crossed. Used to bound the funding hold for stopped trades.
+  stopHitH?: Record<string, number | null>;
 }
+
+const ANNUAL_HOURS = 8760;
 interface CoinJSON {
   coin: string;
   queued?: { signals_detail: QueuedDetail[] };
@@ -69,34 +74,70 @@ function rMultiple(s: QueuedDetail, stop: number): { r: number; exit: Exit } {
   return { r: -s.finalPct / stop, exit: "timeout" };
 }
 
+// Funding-adjusted R for a SHORT — ADDITIVE to price R, never replaces it.
+// Constant-APR model: the funding APR at signal fire is assumed to persist over
+// the position's life (extreme funding is sticky through a squeeze; holds are
+// ≤ the timeout). A short's funding P&L over H hours is
+// (fundingApr/100)·(H/ANNUAL_HOURS)·notional — negative APR ⇒ short PAYS — which
+// in R is that fraction ÷ (stop/100) (notional cancels). Hold = stop-hit hour
+// for stopped trades, else the full timeout window.
+// CAVEAT: backtest fundingApr is the Bybit/Binance MOST-EXTREME series, so it
+// OVERSTATES the funding a KuCoin short actually pays — a conservative bound,
+// not ground truth. Live realized funding now lives in kucoin_positions.json
+// (analyze_funding.ts), use that for the real number.
+function fundingR(s: QueuedDetail, stop: number, exit: Exit): number {
+  const holdH =
+    exit === "stop" ? (s.stopHitH?.[String(stop)] ?? LOOKAHEAD_H) : LOOKAHEAD_H;
+  const fundingFrac = (s.fundingApr / 100) * (holdH / ANNUAL_HOURS);
+  return fundingFrac / (stop / 100);
+}
+
 interface Stats {
   trades: number;
-  wins: number;
-  avgR: number;
-  totalR: number;
+  wins: number; // price-only wins (priceR > 0)
+  avgR: number; // price-only
+  totalR: number; // price-only
   stopped: number;
   timeout: number;
+  // Funding-adjusted (additive) — price-only fields above are untouched.
+  avgFundR: number; // mean funding R per trade (≤0 for negative-funding shorts)
+  avgAllInR: number; // mean (price + funding) R per trade
+  totalAllInR: number;
+  winsAllIn: number; // trades still positive after funding
 }
 
 function runScenario(signals: QueuedDetail[], stop: number): Stats {
   let wins = 0,
     stopped = 0,
     timeout = 0,
-    sumR = 0;
+    sumR = 0,
+    sumFundR = 0,
+    sumAllIn = 0,
+    winsAllIn = 0;
   for (const s of signals) {
     const { r, exit } = rMultiple(s, stop);
+    const fR = fundingR(s, stop, exit);
+    const allIn = r + fR;
     sumR += r;
+    sumFundR += fR;
+    sumAllIn += allIn;
     if (r > 0) wins++;
+    if (allIn > 0) winsAllIn++;
     if (exit === "stop") stopped++;
     else timeout++;
   }
+  const n = signals.length;
   return {
-    trades: signals.length,
+    trades: n,
     wins,
-    avgR: signals.length ? sumR / signals.length : 0,
+    avgR: n ? sumR / n : 0,
     totalR: sumR,
     stopped,
     timeout,
+    avgFundR: n ? sumFundR / n : 0,
+    avgAllInR: n ? sumAllIn / n : 0,
+    totalAllInR: sumAllIn,
+    winsAllIn,
   };
 }
 
@@ -148,7 +189,8 @@ function main() {
   console.log("─".repeat(72));
   console.log(
     `  ${"Stop".padEnd(10)} ${"AvgP&L/trade".padStart(16)} ` +
-      `${"WinRate".padStart(8)} ${"Stopped".padStart(9)} ${"Timeout".padStart(9)}`,
+      `${"WinRate".padStart(8)} ${"Stopped".padStart(9)} ${"Timeout".padStart(9)} ` +
+      `${"AllIn±fund".padStart(11)}`,
   );
   for (const stop of STOP_SWEEP) {
     const s = runScenario(all, stop);
@@ -158,7 +200,8 @@ function main() {
         `${(sgnR(s.avgR) + " / " + rAsPct(s.avgR)).padStart(16)} ` +
         `${pct(s.wins, s.trades).padStart(8)} ` +
         `${pct(s.stopped, s.trades).padStart(9)} ` +
-        `${pct(s.timeout, s.trades).padStart(9)}${tag}`,
+        `${pct(s.timeout, s.trades).padStart(9)} ` +
+        `${sgnR(s.avgAllInR).padStart(11)}${tag}`,
     );
   }
 
@@ -166,15 +209,20 @@ function main() {
   console.log("\n" + "─".repeat(72));
   console.log(`  BY SIGNAL TYPE — at live stop (${LIVE_STOP}%)`);
   console.log("─".repeat(72));
+  console.log(
+    `  (price = price-only R; fund = modeled funding R; all-in = price+fund; ` +
+      `win = price→all-in)`,
+  );
   for (const t of ["BUILDING", "PUMP_TOP", "EXHAUSTION", "TREND_BREAK"]) {
     const sub = all.filter((s) => s.type === t);
     if (!sub.length) continue;
     const s = runScenario(sub, LIVE_STOP);
     console.log(
-      `  ${t.padEnd(12)} ${String(sub.length).padStart(4)} trades  ` +
-        `avgP&L ${sgnR(s.avgR)} (${rAsPct(s.avgR)})  ` +
-        `winRate ${pct(s.wins, s.trades)}  ` +
-        `stopped ${pct(s.stopped, s.trades)}`,
+      `  ${t.padEnd(12)} ${String(sub.length).padStart(4)}  ` +
+        `price ${sgnR(s.avgR)}  ` +
+        `fund ${sgnR(s.avgFundR)}  ` +
+        `all-in ${sgnR(s.avgAllInR)} (${rAsPct(s.avgAllInR)})  ` +
+        `win ${pct(s.wins, s.trades)}→${pct(s.winsAllIn, s.trades)}`,
     );
   }
 
@@ -281,6 +329,13 @@ function main() {
       "  no take-profit, so a winning short rides until it reverses into the\n" +
       `  stop or the ${LOOKAHEAD_H}h timeout closes it. R-multiples are sizing-agnostic;\n` +
       "  the % figures assume the live riskPerTrade.",
+  );
+  console.log(
+    `\n  Funding columns model a SHORT paying the signal-time funding APR over the\n` +
+      `  hold (constant-APR approximation). The APR is the Bybit/Binance most-extreme\n` +
+      `  series, so funding R is a CONSERVATIVE (over-stated) bound, not ground truth —\n` +
+      `  use analyze_funding.ts on kucoin_positions.json for realized KuCoin funding.\n` +
+      `  Price-only R (the validated metric) is unchanged; all-in is shown alongside.`,
   );
 }
 

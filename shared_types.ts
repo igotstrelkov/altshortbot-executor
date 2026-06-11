@@ -58,4 +58,11 @@ export interface PaperTrade {
   closeReason: "stop" | "timeout" | "manual";
   signalType: string;
   confidence: string;
+  // Realised funding over the hold (USDT; negative = paid). Shorts on negative
+  // funding PAY — a cost the price-only `pnlUsdc` omits. Persisted so all-in R
+  // (priceR + fundingR) is recomputable without re-fetching from the exchange,
+  // which has limited funding-history retention. Optional: null when funding
+  // could not be fetched (paper mode, API failure, or records written before
+  // this field existed).
+  fundingPaidUsdt?: number | null;
 }

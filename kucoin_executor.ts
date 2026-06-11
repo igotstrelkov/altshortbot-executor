@@ -899,6 +899,7 @@ async function managePositions(store: KucoinPositionStore): Promise<void> {
         closeReason,
         signalType: pos.signalType,
         confidence: pos.signalConfidence,
+        fundingPaidUsdt: fundingPaid,
       };
       store.closed.push(trade);
 
@@ -924,10 +925,21 @@ async function managePositions(store: KucoinPositionStore): Promise<void> {
         stopLossPx: pos.stopLossPx,
       });
 
+      // All-in result: price P&L is what `pnlUsdc`/`rMultiple` measure, but a
+      // short on negative funding also pays carry. Fold funding into R for the
+      // headline so a flat-price timeout that bled funding does not read as a
+      // harmless scratch. priceR (rMultiple) is preserved untouched above.
+      const riskUsdt = RISK.stopLossPct * pos.notionalUsdc; // 1R, in USDT
+      const fundingR =
+        fundingPaid !== null && riskUsdt > 0 ? fundingPaid / riskUsdt : null;
+      const allInR = fundingR !== null ? rMultiple + fundingR : null;
+
       const icon = finalPnlPct > 0 ? "✅" : "❌";
       const mode = IS_PAPER ? "📄 " : "";
       const fundingNote =
-        fundingPaid !== null ? ` | funding $${fundingPaid.toFixed(2)}` : "";
+        fundingPaid !== null
+          ? ` | funding $${fundingPaid.toFixed(2)} (${fundingR!.toFixed(2)}R → all-in ${allInR!.toFixed(2)}R)`
+          : "";
       await sendTelegram(
         `${mode}${icon} *${coin}* closed (${closeReason})\n` +
           `Entry: $${pos.entryPx.toFixed(6)} → Exit: $${closePx.toFixed(6)}\n` +
@@ -998,7 +1010,7 @@ async function executeSignal(
     const manualStop = entry * (1 + RISK.stopLossPct);
     console.log(`  ${coin}: not on KuCoin — manual Bybit alert sent`);
     await sendTelegram(
-      `🟡 *${coin}* ${signalType} — not on KuCoin, *place manually on Bybit*\n` +
+      `🟡 *${coin}:* not on KuCoin, *place manually on Bybit*\n` +
         `Entry: $${entry.toFixed(6)} | Stop: $${manualStop.toFixed(6)} ` +
         `(+${(RISK.stopLossPct * 100).toFixed(0)}%)\n` +
         `Funding: ${fundingApr.toFixed(0)}% APR | ${confidence}`,
