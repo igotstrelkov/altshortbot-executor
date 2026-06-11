@@ -32,6 +32,12 @@ export interface PositionRecord {
   signalConfidence: "HIGH" | "MEDIUM";
   stopOid?: number;
   isPaper: boolean;
+  // Excursion tracking for post-trade diagnostics, updated each manage cycle.
+  // maxAdversePx = highest price seen (worst for a short → MAE); maxFavorablePx
+  // = lowest price seen (best for a short → MFE). Optional for back-compat with
+  // records written before this field.
+  maxAdversePx?: number;
+  maxFavorablePx?: number;
 }
 
 export type PositionStore = Record<string, PositionRecord>;

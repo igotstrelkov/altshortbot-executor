@@ -741,6 +741,35 @@ async function fetchAvgEntryPrice(symbol: string): Promise<number | null> {
   return null;
 }
 
+/**
+ * Realised funding paid/earned over a position's life (USDT; negative = paid).
+ * Sums the per-event `funding` amounts from getFundingHistory in [fromMs, toMs].
+ * Shorts on negative funding PAY funding, so this is usually negative for this
+ * strategy — a cost the backtest does not model. Best-effort: null on failure
+ * (diagnostic only, never blocks a close).
+ */
+async function fetchFundingPaid(
+  symbol: string,
+  fromMs: number,
+  toMs: number,
+): Promise<number | null> {
+  if (IS_PAPER) return null;
+  try {
+    const res = (await client.getFundingHistory({
+      symbol,
+      from: fromMs,
+      to: toMs,
+    })) as KucoinEnvelope<{ dataList?: { funding?: number }[] }>;
+    if (res?.code !== KC_OK || !res.data?.dataList) return null;
+    return res.data.dataList.reduce(
+      (sum, r) => sum + (Number(r.funding) || 0),
+      0,
+    );
+  } catch {
+    return null;
+  }
+}
+
 // ─── Reconciliation ──────────────────────────────────────────────────────────
 /**
  * Reconcile the local store against actual KuCoin positions. managePositions
@@ -794,6 +823,11 @@ async function managePositions(store: KucoinPositionStore): Promise<void> {
 
     const pnlPct = ((pos.entryPx - currentPx) / pos.entryPx) * 100;
 
+    // Track excursion extremes for post-trade diagnostics: maxAdversePx = highest
+    // price seen (worst for a short → MAE), maxFavorablePx = lowest (best → MFE).
+    pos.maxAdversePx = Math.max(pos.maxAdversePx ?? pos.entryPx, currentPx);
+    pos.maxFavorablePx = Math.min(pos.maxFavorablePx ?? pos.entryPx, currentPx);
+
     // Stop detection. Live: the exchange's stop order closed the position, so
     // currentQty becomes 0. Paper: compare price to the stored stop.
     let stopHit = false;
@@ -836,6 +870,23 @@ async function managePositions(store: KucoinPositionStore): Promise<void> {
       const finalPnlPct = ((pos.entryPx - closePx) / pos.entryPx) * 100;
       const finalPnlUsdt = (finalPnlPct / 100) * pos.notionalUsdc;
 
+      // ── Post-trade diagnostics ────────────────────────────────────────────
+      const maxAdv = Math.max(pos.maxAdversePx ?? pos.entryPx, closePx);
+      const maxFav = Math.min(pos.maxFavorablePx ?? pos.entryPx, closePx);
+      const maePct = ((maxAdv - pos.entryPx) / pos.entryPx) * 100; // ≥0 worst against
+      const mfePct = ((pos.entryPx - maxFav) / pos.entryPx) * 100; // ≥0 best in favor
+      const holdH = (nowMs - pos.openedAt) / 3_600_000;
+      const rMultiple = finalPnlPct / (RISK.stopLossPct * 100); // stop = -1R
+      // Exit slippage (stops only): how far past the intended stop it actually
+      // filled — positive = filled worse (higher) than the stop trigger.
+      const exitSlipPct =
+        closeReason === "stop"
+          ? ((closePx - pos.stopLossPx) / pos.stopLossPx) * 100
+          : 0;
+      // Realised funding over the hold (USDT; negative = paid). Shorts on
+      // negative funding pay — a cost the backtest does not model.
+      const fundingPaid = await fetchFundingPaid(symbol, pos.openedAt, nowMs);
+
       const trade: PaperTrade = {
         coin,
         openedAt: pos.openedAt,
@@ -862,17 +913,30 @@ async function managePositions(store: KucoinPositionStore): Promise<void> {
         pnlUsdc: finalPnlUsdt,
         pnlPct: finalPnlPct,
         closeReason,
+        // diagnostics
+        maePct,
+        mfePct,
+        holdH,
+        rMultiple,
+        exitSlipPct,
+        fundingPaidUsdt: fundingPaid,
+        entryPx: pos.entryPx,
+        stopLossPx: pos.stopLossPx,
       });
 
       const icon = finalPnlPct > 0 ? "✅" : "❌";
       const mode = IS_PAPER ? "📄 " : "";
+      const fundingNote =
+        fundingPaid !== null ? ` | funding $${fundingPaid.toFixed(2)}` : "";
       await sendTelegram(
         `${mode}${icon} *${coin}* closed (${closeReason})\n` +
           `Entry: $${pos.entryPx.toFixed(6)} → Exit: $${closePx.toFixed(6)}\n` +
-          `P&L: ${finalPnlPct.toFixed(2)}% | USDT: ${finalPnlUsdt.toFixed(2)}`,
+          `P&L: ${finalPnlPct.toFixed(2)}% (${rMultiple.toFixed(2)}R) | USDT: ${finalPnlUsdt.toFixed(2)}\n` +
+          `MAE ${maePct.toFixed(1)}% | MFE ${mfePct.toFixed(1)}% | ${holdH.toFixed(1)}h${fundingNote}`,
       );
       console.log(
-        `  ${coin}: closed (${closeReason}) ${finalPnlPct.toFixed(2)}% — $${finalPnlUsdt.toFixed(2)}`,
+        `  ${coin}: closed (${closeReason}) ${finalPnlPct.toFixed(2)}% (${rMultiple.toFixed(2)}R) ` +
+          `MAE ${maePct.toFixed(1)}% MFE ${mfePct.toFixed(1)}% — $${finalPnlUsdt.toFixed(2)}`,
       );
     } else {
       console.log(
@@ -1001,8 +1065,16 @@ async function executeSignal(
     signalType: signalType as PositionRecord["signalType"],
     signalConfidence: confidence as PositionRecord["signalConfidence"],
     isPaper: IS_PAPER,
+    maxAdversePx: fillPx, // seed excursion tracking at the entry price
+    maxFavorablePx: fillPx,
   };
   store.open[coin] = record;
+
+  // Open-time diagnostics for performance debugging.
+  const signalAgeSec = (record.openedAt - sig.firedAt) / 1000;
+  const venueDivergencePct = ((livePx - entry) / entry) * 100; // KuCoin vs signal
+  const fillGapPct = ((fillPx - entry) / entry) * 100; // fill vs signal
+  const estLiqDistPct = 100 / leverage; // ~liq distance for an isolated short
 
   await postSignalEvent("opened", {
     coin,
@@ -1011,12 +1083,17 @@ async function executeSignal(
     firedAt: sig.firedAt,
     openedAt: record.openedAt,
     entryPx: fillPx,
-    // signalPx: entry,
+    signalPx: entry,
     stopLossPx: stopPx,
     fundingApr: sig.fundingApr,
     notionalUsdc: notionalUsdt,
     leverage,
     isPaper: IS_PAPER,
+    // diagnostics
+    signalAgeSec,
+    venueDivergencePct,
+    fillGapPct,
+    estLiqDistPct,
   });
 
   // Round-up can push realized risk above target — flag it (informational).
