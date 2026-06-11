@@ -49,6 +49,11 @@ const RISK = {
   stopLossPct: 0.15, // ← was 0.20
   maxPositions: 10,
   timeoutH: 24,
+  // Re-entry cooldown: after a coin stops out, do not re-short it for this many
+  // hours. Drawdown insurance — halves bad-regime drawdown in the universe sim
+  // by not re-stacking into a still-squeezing coin. Costs some return in benign
+  // regimes (a deliberate risk trade). Kept in sync with the KuCoin executor.
+  reentryCooldownH: 24,
 } as const;
 
 // Coins never traded regardless of signal. H is mid-redenomination and prices
@@ -524,6 +529,27 @@ async function executeSignal(
   // Hard exclude (e.g. H — redenomination chaos). Never trade these.
   if (EXCLUDE_COINS.has(coin)) {
     console.log(`  ${coin}: on executor exclude list — skipping`);
+    return;
+  }
+
+  // Re-entry cooldown: do not re-short a coin that stopped out within the last
+  // reentryCooldownH. Re-stacking into a still-squeezing coin is a net loser;
+  // blocking it is drawdown insurance.
+  const lastStopAt = store.closed.reduce(
+    (max, t) =>
+      t.coin === coin && t.closeReason === "stop" && t.closedAt > max
+        ? t.closedAt
+        : max,
+    0,
+  );
+  if (
+    lastStopAt > 0 &&
+    Date.now() - lastStopAt < RISK.reentryCooldownH * 3_600_000
+  ) {
+    const hSince = ((Date.now() - lastStopAt) / 3_600_000).toFixed(1);
+    console.log(
+      `  ${coin}: stopped out ${hSince}h ago (< ${RISK.reentryCooldownH}h cooldown) — skipping`,
+    );
     return;
   }
 

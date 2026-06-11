@@ -63,6 +63,34 @@ let TIMEOUT_H = 48;
 // riskPerTrade values to sweep — 3% is the live setting.
 const RISK_SWEEP = [0.02, 0.03, 0.04, 0.06];
 const LIVE_RISK = 0.03;
+// --split: run the cooldown sweep on each calendar half of the window
+// separately — an out-of-sample robustness check on the cooldown parameter.
+const SPLIT = process.argv.includes("--split");
+
+// Print the re-entry cooldown sweep for a given signal set.
+function printCooldownSweep(sigs: Signal[], title: string): void {
+  console.log("\n" + "─".repeat(72));
+  console.log(`  ${title}`);
+  console.log("─".repeat(72));
+  console.log(
+    `  ${"cooldown".padEnd(10)} ${"Drop".padStart(5)} ${"FinalEquity".padStart(13)} ` +
+      `${"Return".padStart(10)} ${"MaxDD".padStart(8)} ` +
+      `${"Trades".padStart(8)} ${"WinRate".padStart(8)}`,
+  );
+  for (const cd of [0, 6, 12, 24, 48, 72]) {
+    const r = simulate(sigs, LIVE_RISK, MAX_POSITIONS, STOP_PCT, cd);
+    const label = cd === 0 ? "0h (base)" : `${cd}h`;
+    const tag = cd === 0 ? " ←BASELINE" : "";
+    console.log(
+      `  ${label.padEnd(10)} ${String(r.cooldownSkipped).padStart(5)} ` +
+        `${("$" + Math.round(r.finalEquity).toLocaleString()).padStart(13)} ` +
+        `${pct(r.returnPct).padStart(10)} ` +
+        `${("-" + r.maxDrawdownPct.toFixed(1) + "%").padStart(8)} ` +
+        `${String(r.trades).padStart(8)} ` +
+        `${((100 * r.wins) / Math.max(1, r.trades)).toFixed(0).padStart(7)}%${tag}`,
+    );
+  }
+}
 
 interface QueuedDetail {
   firedAt: string;
@@ -113,6 +141,7 @@ interface SimResult {
   maxDrawdownPct: number;
   trades: number;
   skipped: number;
+  cooldownSkipped: number; // signals skipped by the re-entry cooldown
   wins: number;
   stops: number;
   peakConcurrent: number;
@@ -124,21 +153,25 @@ function simulate(
   riskPerTrade: number,
   maxPositions: number = MAX_POSITIONS,
   stop: number = STOP_PCT,
+  cooldownH: number = 0, // re-entry cooldown: skip a coin within N h of a stop-out
 ): SimResult {
   let equity = START_EQUITY;
   let peakEquity = START_EQUITY;
   let maxDD = 0;
   let trades = 0,
     skipped = 0,
+    cooldownSkipped = 0,
     wins = 0,
     stops = 0,
     peakConcurrent = 0;
   let worstTradePct = 0;
 
   // Open positions: each resolves at closeMs with a known R-multiple.
-  const open: { closeMs: number; r: number }[] = [];
+  const open: { closeMs: number; r: number; coin: string }[] = [];
   // riskUsdt is fixed at OPEN time (sized off equity then) — stored per position.
-  const closedRisk = new Map<{ closeMs: number; r: number }, number>();
+  const closedRisk = new Map<{ closeMs: number; r: number; coin: string }, number>();
+  // Per-coin time of the most recent stop-out close — drives the cooldown.
+  const lastStopMs = new Map<string, number>();
 
   const closeDue = (upTo: number) => {
     // Resolve every position whose timeout window has elapsed, in time order.
@@ -152,7 +185,10 @@ function simulate(
       const tradePct = (pnl / equityBefore) * 100;
       if (tradePct < worstTradePct) worstTradePct = tradePct;
       if (pos.r > 0) wins++;
-      if (pos.r <= -1) stops++;
+      if (pos.r <= -1) {
+        stops++;
+        lastStopMs.set(pos.coin, pos.closeMs); // start the cooldown for this coin
+      }
       peakEquity = Math.max(peakEquity, equity);
       const dd = ((peakEquity - equity) / peakEquity) * 100;
       if (dd > maxDD) maxDD = dd;
@@ -161,6 +197,14 @@ function simulate(
 
   for (const sig of signals) {
     closeDue(sig.openMs); // free slots / realise P&L up to this signal's time
+    // Re-entry cooldown: skip if this coin stopped out within the window.
+    if (cooldownH > 0) {
+      const last = lastStopMs.get(sig.coin);
+      if (last != null && sig.openMs - last < cooldownH * 3_600_000) {
+        cooldownSkipped++;
+        continue;
+      }
+    }
     if (open.length >= maxPositions) {
       skipped++;
       continue;
@@ -177,7 +221,7 @@ function simulate(
       const stopHrs = sig.stopHitH?.[String(stop)] ?? null;
       if (stopHrs !== null) actualCloseMs = sig.openMs + stopHrs * 3_600_000;
     }
-    const pos = { closeMs: actualCloseMs, r };
+    const pos = { closeMs: actualCloseMs, r, coin: sig.coin };
     closedRisk.set(pos, riskUsdt);
     open.push(pos);
     trades++;
@@ -191,6 +235,7 @@ function simulate(
     maxDrawdownPct: maxDD,
     trades,
     skipped,
+    cooldownSkipped,
     wins,
     stops,
     peakConcurrent,
@@ -347,6 +392,41 @@ function main() {
       `  MaxDD and WinRate too — a tighter stop stops out more trades, so the\n` +
       `  equity curve can get choppier even when the total is higher.`,
   );
+
+  // ── re-entry cooldown sweep — does not re-shorting a just-stopped coin help? ─
+  // riskPerTrade / maxPositions / stop held live; only the cooldown varies. "0h"
+  // = baseline (no cooldown). "Drop" = signals removed by the cooldown.
+  if (SPLIT) {
+    // Out-of-sample: run the sweep on each calendar half independently.
+    const times = signals.map((s) => s.openMs);
+    const minT = Math.min(...times);
+    const mid = (minT + Math.max(...times)) / 2;
+    const firstHalf = signals.filter((s) => s.openMs < mid);
+    const secondHalf = signals.filter((s) => s.openMs >= mid);
+    printCooldownSweep(
+      firstHalf,
+      `RE-ENTRY COOLDOWN — FIRST HALF (${firstHalf.length} signals, out-of-sample)`,
+    );
+    printCooldownSweep(
+      secondHalf,
+      `RE-ENTRY COOLDOWN — SECOND HALF (${secondHalf.length} signals, out-of-sample)`,
+    );
+    console.log(
+      `\n  Robust if the cooldown beats '0h' on BOTH halves — and if the best\n` +
+        `  parameter agrees across halves. If it only helps in one half, it's\n` +
+        `  period-specific, not a real edge.`,
+    );
+  } else {
+    printCooldownSweep(
+      signals,
+      `RE-ENTRY COOLDOWN SWEEP  (riskPerTrade ${(LIVE_RISK * 100).toFixed(0)}%, maxPositions ${MAX_POSITIONS})`,
+    );
+    console.log(
+      `\n  Read: compare each row to '0h'. The cooldown earns its keep only if it\n` +
+        `  cuts MaxDD by more than it cuts Return — i.e. the re-entries it blocks\n` +
+        `  were net losers.`,
+    );
+  }
 
   // ── Detail at the live setting ─────────────────────────────────────────────
   console.log("\n" + "─".repeat(72));

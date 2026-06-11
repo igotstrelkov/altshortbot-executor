@@ -74,6 +74,12 @@ const RISK = {
   stopLossPct: 0.15, // 15% stop loss
   maxPositions: 5, // max concurrent open positions
   timeoutH: 24, // close after 24h regardless (validated 2026-05-28: 24h optimal vs 48h/72h)
+  // Re-entry cooldown: after a coin stops out, do not re-short it for this many
+  // hours. Drawdown insurance — the universe sim halved bad-regime drawdown
+  // (-49%→-23% at 24h) by breaking the serial-restack-into-a-squeeze loop. It
+  // costs some return in benign regimes (out-of-sample second half), so it's a
+  // deliberate risk trade, not a free edge. See HISTORY.md / sim notes.
+  reentryCooldownH: 24,
 } as const;
 
 // If integer-contract rounding pushes realized risk above this multiple of
@@ -849,6 +855,27 @@ async function executeSignal(
   // Hard exclude (e.g. H — Bybit/KuCoin price split). Never trade these.
   if (EXCLUDE_COINS.has(coin)) {
     console.log(`  ${coin}: on executor exclude list — skipping`);
+    return;
+  }
+
+  // Re-entry cooldown: do not re-short a coin that stopped out within the last
+  // reentryCooldownH. Re-stacking into a coin that just stopped you (still
+  // squeezing) is a net loser; blocking it is drawdown insurance.
+  const lastStopAt = store.closed.reduce(
+    (max, t) =>
+      t.coin === coin && t.closeReason === "stop" && t.closedAt > max
+        ? t.closedAt
+        : max,
+    0,
+  );
+  if (
+    lastStopAt > 0 &&
+    Date.now() - lastStopAt < RISK.reentryCooldownH * 3_600_000
+  ) {
+    const hSince = ((Date.now() - lastStopAt) / 3_600_000).toFixed(1);
+    console.log(
+      `  ${coin}: stopped out ${hSince}h ago (< ${RISK.reentryCooldownH}h cooldown) — skipping`,
+    );
     return;
   }
 
