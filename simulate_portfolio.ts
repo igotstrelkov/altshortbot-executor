@@ -135,6 +135,20 @@ function rMultiple(s: QueuedDetail, stop: number): number {
   return -s.finalPct / stop; // timeout — close at whatever price is live
 }
 
+const ANNUAL_HOURS = 8760;
+// Funding R for a SHORT over a hold of holdH hours — ADDITIVE to price R.
+// Constant-APR model: the signal-time funding APR is assumed to hold over the
+// position's life. A short's funding P&L = (fundingApr/100)·(holdH/ANNUAL_HOURS)
+// of notional (negative APR ⇒ short PAYS), which in R is that fraction ÷
+// (stop/100) — notional cancels. CAVEAT: backtest fundingApr is the
+// Bybit/Binance MOST-EXTREME series, so this OVER-states the funding a KuCoin
+// short actually pays — a conservative bound. Realized KuCoin funding lives in
+// kucoin_positions.json (analyze_funding.ts).
+function fundingShortR(s: QueuedDetail, stop: number, holdH: number): number {
+  const fundingFrac = (s.fundingApr / 100) * (holdH / ANNUAL_HOURS);
+  return fundingFrac / (stop / 100);
+}
+
 interface SimResult {
   finalEquity: number;
   returnPct: number;
@@ -148,12 +162,17 @@ interface SimResult {
   worstTradePct: number; // worst single-trade hit to equity, %
 }
 
+// A position carries price R (for stop/slot classification — a stop is a price
+// event) and pnlR (price + funding when funding is modeled — drives equity).
+type OpenPos = { closeMs: number; r: number; pnlR: number; coin: string };
+
 function simulate(
   signals: Signal[],
   riskPerTrade: number,
   maxPositions: number = MAX_POSITIONS,
   stop: number = STOP_PCT,
   cooldownH: number = 0, // re-entry cooldown: skip a coin within N h of a stop-out
+  includeFunding: boolean = false, // fold modeled funding into equity/drawdown
 ): SimResult {
   let equity = START_EQUITY;
   let peakEquity = START_EQUITY;
@@ -167,9 +186,9 @@ function simulate(
   let worstTradePct = 0;
 
   // Open positions: each resolves at closeMs with a known R-multiple.
-  const open: { closeMs: number; r: number; coin: string }[] = [];
+  const open: OpenPos[] = [];
   // riskUsdt is fixed at OPEN time (sized off equity then) — stored per position.
-  const closedRisk = new Map<{ closeMs: number; r: number; coin: string }, number>();
+  const closedRisk = new Map<OpenPos, number>();
   // Per-coin time of the most recent stop-out close — drives the cooldown.
   const lastStopMs = new Map<string, number>();
 
@@ -179,13 +198,14 @@ function simulate(
     while (open.length && open[0].closeMs <= upTo) {
       const pos = open.shift()!;
       const riskUsdt = closedRisk.get(pos)!;
-      const pnl = pos.r * riskUsdt;
+      const pnl = pos.pnlR * riskUsdt; // pnlR = price (+ funding when modeled)
       const equityBefore = equity;
       equity += pnl;
       const tradePct = (pnl / equityBefore) * 100;
       if (tradePct < worstTradePct) worstTradePct = tradePct;
-      if (pos.r > 0) wins++;
+      if (pos.pnlR > 0) wins++; // a "win" = net positive after funding
       if (pos.r <= -1) {
+        // stop classification is a PRICE event — funding never creates a stop
         stops++;
         lastStopMs.set(pos.coin, pos.closeMs); // start the cooldown for this coin
       }
@@ -221,7 +241,9 @@ function simulate(
       const stopHrs = sig.stopHitH?.[String(stop)] ?? null;
       if (stopHrs !== null) actualCloseMs = sig.openMs + stopHrs * 3_600_000;
     }
-    const pos = { closeMs: actualCloseMs, r, coin: sig.coin };
+    const holdH = (actualCloseMs - sig.openMs) / 3_600_000;
+    const fR = includeFunding ? fundingShortR(sig, stop, holdH) : 0;
+    const pos: OpenPos = { closeMs: actualCloseMs, r, pnlR: r + fR, coin: sig.coin };
     closedRisk.set(pos, riskUsdt);
     open.push(pos);
     trades++;
@@ -327,6 +349,36 @@ function main() {
         `${((100 * r.wins) / Math.max(1, r.trades)).toFixed(0).padStart(7)}%${tag}`,
     );
   }
+
+  // ── funding-adjusted risk sweep — the same sweep, funding folded in ────────
+  // Additive: the sweep above is price-only (the validated metric). This repeats
+  // it with modeled funding in the equity curve so the drawdown/return cost of
+  // carry is visible. Funding here is the conservative most-extreme bound (see
+  // fundingShortR) — realized KuCoin funding is in analyze_funding.ts.
+  console.log("\n" + "─".repeat(72));
+  console.log("  RISK-PER-TRADE SWEEP — FUNDING-ADJUSTED (price-only → all-in)");
+  console.log("─".repeat(72));
+  console.log(
+    `  ${"risk/trade".padEnd(12)} ${"Return".padStart(20)} ` +
+      `${"MaxDD p→all-in".padStart(18)} ${"WinRate".padStart(8)}`,
+  );
+  for (const rpt of RISK_SWEEP) {
+    const p = simulate(signals, rpt); // price-only
+    const f = simulate(signals, rpt, MAX_POSITIONS, STOP_PCT, 0, true); // +funding
+    const tag = rpt === LIVE_RISK ? " ←LIVE" : "";
+    console.log(
+      `  ${((rpt * 100).toFixed(0) + "%").padEnd(12)} ` +
+        `${(pct(p.returnPct) + "→" + pct(f.returnPct)).padStart(20)} ` +
+        `${("-" + p.maxDrawdownPct.toFixed(0) + "%→-" + f.maxDrawdownPct.toFixed(0) + "%").padStart(18)} ` +
+        `${((100 * f.wins) / Math.max(1, f.trades)).toFixed(0).padStart(7)}%${tag}`,
+    );
+  }
+  console.log(
+    `\n  Read: funding shifts return and (usually) deepens drawdown — the cost of\n` +
+      `  holding negative-funding shorts. If a risk level's all-in return stays\n` +
+      `  clearly positive with tolerable MaxDD, the edge survives carry. WinRate\n` +
+      `  shown is all-in (net-positive trades after funding).`,
+  );
 
   // ── maxPositions sweep — what is the concurrency cap costing? ───────────────
   // riskPerTrade held at the live setting; only the concurrency cap varies.
@@ -450,6 +502,12 @@ function main() {
   console.log(
     `  Peak concurrent: ${live.peakConcurrent}/${MAX_POSITIONS}   ` +
       `worst single trade: ${live.worstTradePct.toFixed(1)}% of equity`,
+  );
+  const liveFunded = simulate(signals, LIVE_RISK, MAX_POSITIONS, STOP_PCT, 0, true);
+  console.log(
+    `  Funding-adjusted: $${Math.round(liveFunded.finalEquity).toLocaleString()} ` +
+      `(${pct(liveFunded.returnPct)}, was ${pct(live.returnPct)})   ` +
+      `MaxDD -${liveFunded.maxDrawdownPct.toFixed(1)}% (was -${live.maxDrawdownPct.toFixed(1)}%)`,
   );
 
   console.log("\n" + "═".repeat(72));
