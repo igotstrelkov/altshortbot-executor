@@ -2253,6 +2253,9 @@ interface QueuedEntry {
   // null if never crossed. Lets simulate_portfolio.ts release a slot when
   // the stop fires, not at the full timeout. Keyed by percent: "12","15",...
   stopHitH: StopHitMap;
+  // Funding % over the hold each sweep stop implies (negative = short pays),
+  // integrated from the actual per-settlement path — see computeFundingPctByStop.
+  fundingPctByStop: Record<string, number>;
   oiDropPct?: number; // BUILDING only: OI drop % at fire (negative = OI rising)
   hadOiData?: boolean; // BUILDING only: OI history available — OI gate evaluable
   trendingAtFire?: boolean; // PUMP_TOP only: coin parabolic when signal fired
@@ -2278,6 +2281,36 @@ function exhaustionQueueable(msSinceBuilding: number | null): boolean {
 // re-validated on the full universe.
 const EXHAUSTION_QUEUEING_ENABLED = false;
 
+// Funding % over the hold each sweep stop implies, integrated from the ACTUAL
+// per-settlement funding path. fundingAprByHour is zero-filled at non-settlement
+// hours; a settlement hour holds APR = rate8h × 1095 × 100, so summing the APRs
+// over the held hourly grid and dividing by SETTLEMENTS_PER_YEAR (1095) recovers
+// the realized per-settlement rates as a percent (verified: 3 settlements at
+// -1095% APR → -3%). Exit = the stop-hit hour when stopped, else the timeout.
+// Negative = the short pays. This mirrors the integrated model in
+// check_building_signals.ts — replacing the constant-APR estimate that
+// over-stated momentary funding spikes and the cap that under-stated persistent
+// ones. Window (fire, exit] matches the monitor.
+const SETTLEMENTS_PER_YEAR_BT = 1095;
+function computeFundingPctByStop(
+  fundingAprByHour: Record<number, number>,
+  firedAtMs: number,
+  stopHitH: StopHitMap,
+  lookaheadH: number,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const pct of STOP_SWEEP_PCTS) {
+    const key = `${pct}` as StopSweepKey;
+    const hit = stopHitH[key];
+    const exitMs = firedAtMs + (hit ?? lookaheadH) * 3_600_000;
+    let sumApr = 0;
+    for (let ts = floorH(firedAtMs) + 3_600_000; ts <= exitMs; ts += 3_600_000)
+      sumApr += fundingAprByHour[ts] ?? 0;
+    out[key] = Math.round((sumApr / SETTLEMENTS_PER_YEAR_BT) * 100) / 100;
+  }
+  return out;
+}
+
 function collectQueuedSignals(
   result: CoinResult,
   config: Config,
@@ -2298,6 +2331,12 @@ function collectQueuedSignals(
       maxPricePct: o.maxPricePct,
       minPricePct: o.minPricePct,
       stopHitH: o.stopHitH,
+      fundingPctByStop: computeFundingPctByStop(
+        result.fundingAprByHour,
+        sig.firedAtMs,
+        o.stopHitH,
+        config.lookaheadHours,
+      ),
       trendingAtFire: sig.trendingAtFire,
     });
   }
@@ -2317,6 +2356,12 @@ function collectQueuedSignals(
       maxPricePct: o.maxPricePct,
       minPricePct: o.minPricePct,
       stopHitH: o.stopHitH,
+      fundingPctByStop: computeFundingPctByStop(
+        result.fundingAprByHour,
+        sig.firedAtMs,
+        o.stopHitH,
+        config.lookaheadHours,
+      ),
       oiDropPct: sig.oiDropPct,
       hadOiData: sig.hadOiData,
     };
@@ -2998,6 +3043,7 @@ function saveJSON(results: CoinResult[], config: Config): void {
               maxPct: Math.round(q.maxPricePct * 100) / 100,
               minPct: Math.round(q.minPricePct * 100) / 100,
               stopHitH: q.stopHitH,
+              fundingPctByStop: q.fundingPctByStop,
               verdict: q.verdict,
               trendingAtFire: q.trendingAtFire ?? false,
               oiDropPct: q.oiDropPct ?? 0,

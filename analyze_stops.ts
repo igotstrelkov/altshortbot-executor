@@ -55,6 +55,10 @@ interface QueuedDetail {
   // Hours-from-entry the price first crossed each stop width (keyed by stop %),
   // null if never crossed. Used to bound the funding hold for stopped trades.
   stopHitH?: Record<string, number | null>;
+  // Funding % over the hold each stop implies (negative = short pays),
+  // integrated from the actual settlement path by run_universe_backtest. Absent
+  // in older result files → fall back to the constant-APR estimate.
+  fundingPctByStop?: Record<string, number>;
 }
 
 const ANNUAL_HOURS = 8760;
@@ -75,17 +79,18 @@ function rMultiple(s: QueuedDetail, stop: number): { r: number; exit: Exit } {
 }
 
 // Funding-adjusted R for a SHORT — ADDITIVE to price R, never replaces it.
-// Constant-APR model: the funding APR at signal fire is assumed to persist over
-// the position's life (extreme funding is sticky through a squeeze; holds are
-// ≤ the timeout). A short's funding P&L over H hours is
-// (fundingApr/100)·(H/ANNUAL_HOURS)·notional — negative APR ⇒ short PAYS — which
-// in R is that fraction ÷ (stop/100) (notional cancels). Hold = stop-hit hour
-// for stopped trades, else the full timeout window.
-// CAVEAT: backtest fundingApr is the Bybit/Binance MOST-EXTREME series, so it
-// OVERSTATES the funding a KuCoin short actually pays — a conservative bound,
-// not ground truth. Live realized funding now lives in kucoin_positions.json
-// (analyze_funding.ts), use that for the real number.
+// Preferred: fundingPctByStop[stop], funding % integrated from the ACTUAL
+// per-settlement path by run_universe_backtest (negative = short pays); in R
+// that is fundingPct ÷ stop% (notional cancels). This is the accurate model —
+// it neither over-states momentary funding spikes (as constant-APR did) nor
+// under-states persistent ones (as a per-8h cap did).
+// FALLBACK (older result files without the field): constant-APR over the hold —
+// the funding APR at fire assumed to persist; OVER-states momentary spikes.
+// Either way this is the Bybit/Binance most-extreme series; the exact realized
+// KuCoin figure is fundingPaidUsdt (analyze_funding.ts).
 function fundingR(s: QueuedDetail, stop: number, exit: Exit): number {
+  const fromPath = s.fundingPctByStop?.[String(stop)];
+  if (fromPath != null) return fromPath / stop; // integrated path (preferred)
   const holdH =
     exit === "stop" ? (s.stopHitH?.[String(stop)] ?? LOOKAHEAD_H) : LOOKAHEAD_H;
   const fundingFrac = (s.fundingApr / 100) * (holdH / ANNUAL_HOURS);

@@ -106,6 +106,10 @@ interface QueuedDetail {
   // full timeout — which over-counted skips, biasing against longer timeouts.
   // Optional for back-compat with result files generated before this field.
   stopHitH?: Record<string, number | null>;
+  // Funding % over the hold each stop implies (negative = short pays),
+  // integrated from the actual settlement path by run_universe_backtest. Absent
+  // in older result files → fall back to the constant-APR estimate.
+  fundingPctByStop?: Record<string, number>;
   verdict: string;
   trendingAtFire?: boolean;
 }
@@ -144,7 +148,13 @@ const ANNUAL_HOURS = 8760;
 // Bybit/Binance MOST-EXTREME series, so this OVER-states the funding a KuCoin
 // short actually pays — a conservative bound. Realized KuCoin funding lives in
 // kucoin_positions.json (analyze_funding.ts).
+// Preferred: fundingPctByStop[stop] — funding % over the hold integrated from
+// the ACTUAL settlement path by run_universe_backtest (in R: fundingPct ÷ stop%).
+// FALLBACK (older result files): constant-APR over the hold, which over-states
+// momentary funding spikes. Both are the Bybit/Binance most-extreme series.
 function fundingShortR(s: QueuedDetail, stop: number, holdH: number): number {
+  const fromPath = s.fundingPctByStop?.[String(stop)];
+  if (fromPath != null) return fromPath / stop; // integrated path (preferred)
   const fundingFrac = (s.fundingApr / 100) * (holdH / ANNUAL_HOURS);
   return fundingFrac / (stop / 100);
 }
