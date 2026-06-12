@@ -21,6 +21,16 @@ const LOOKAHEAD_H =
 const SHOW_ALL = process.argv.includes("--all");
 const SEED_MODE = process.argv.includes("--seed");
 
+// Tradeable filter (mirrors kucoin_executor): the executor never trades H (the
+// Bybit/KuCoin redenomination split) and only queues BUILDING when funding is
+// at/below the -180% floor. The monitor filters to that population by default so
+// Net reflects what is ACTUALLY traded — H in particular carries the most extreme
+// funding in the log and badly distorts the aggregates. --include-untradeable
+// restores the full view.
+const EXCLUDE_COINS = new Set(["H"]);
+const BUILDING_MIN_FUNDING_APR = -180;
+const INCLUDE_UNTRADEABLE = process.argv.includes("--include-untradeable");
+
 interface BuildingSignal {
   coin: string;
   firedAt: string;
@@ -141,6 +151,48 @@ async function fetchAllKlines(
   return out;
 }
 
+// ── Bybit funding-rate path (for realized funding over the hold) ──────────────
+// One settlement per ~8h. limit=200 covers ~66 days — enough for the active
+// window and most expired signals; older windows fall back to the capped est.
+interface FundingPoint {
+  tsMs: number;
+  rate: number; // per-settlement funding rate (fraction; negative ⇒ short pays)
+}
+
+async function fetchFundingPath(coin: string): Promise<FundingPoint[]> {
+  try {
+    const res = await fetch(
+      `${BB_BASE}/v5/market/funding/history?category=linear&symbol=${coin}USDT&limit=200`,
+    );
+    const data = (await res.json()) as {
+      result?: { list?: { fundingRate: string; fundingRateTimestamp: string }[] };
+    };
+    return (data?.result?.list ?? [])
+      .map((r) => ({
+        tsMs: parseInt(r.fundingRateTimestamp),
+        rate: parseFloat(r.fundingRate),
+      }))
+      .filter((p) => Number.isFinite(p.tsMs) && Number.isFinite(p.rate));
+  } catch {
+    return [];
+  }
+}
+
+async function fetchAllFunding(
+  coins: string[],
+): Promise<Map<string, FundingPoint[]>> {
+  const out = new Map<string, FundingPoint[]>();
+  const CHUNK = 10;
+  for (let i = 0; i < coins.length; i += CHUNK) {
+    const chunk = coins.slice(i, i + CHUNK);
+    const res = await Promise.all(
+      chunk.map(async (c) => [c, await fetchFundingPath(c)] as const),
+    );
+    for (const [c, p] of res) out.set(c, p);
+  }
+  return out;
+}
+
 // ── Realized outcome under the executor's rules (15% stop, 24h timeout) ───────
 const STOP_PCT = 15;
 const TIMEOUT_H = 24;
@@ -153,7 +205,9 @@ const TIMEOUT_H = 24;
 const FUNDING_CAP_PER_8H = 0.02; // 2% per 8h settlement
 const SETTLEMENTS_PER_YEAR = 365 * 3; // 8h funding
 
-/** Est funding drag over a hold (%, negative = paid), with the per-8h rate capped. */
+/** FALLBACK funding estimate (%, negative = paid), per-8h rate capped. Used only
+ *  when no Bybit funding history is available for the hold (see realFundingPct).
+ *  The cap badly under-states extreme-funding coins — it is a last resort. */
 function estFundingPct(fundingApr: number, holdH: number): number {
   const ratePer8h = Math.max(
     -FUNDING_CAP_PER_8H,
@@ -162,13 +216,35 @@ function estFundingPct(fundingApr: number, holdH: number): number {
   return ratePer8h * (holdH / 8) * 100;
 }
 
+/**
+ * Realized funding drag over [fromMs, toMs] from the ACTUAL Bybit settlement
+ * path (%, negative = short pays). For a short, funding P&L per settlement is
+ * +rate (a negative rate is a cost), so the drag is the sum of the rates whose
+ * timestamp falls in the hold. Returns 0 when the hold crosses no settlement
+ * (none charged). Returns null — caller falls back to estFundingPct — when there
+ * is no history, or the window predates the available history (so we don't
+ * mistake "no data" for "no funding").
+ */
+function realFundingPct(
+  path: FundingPoint[],
+  fromMs: number,
+  toMs: number,
+): number | null {
+  if (!path.length) return null;
+  const earliest = Math.min(...path.map((p) => p.tsMs));
+  if (fromMs < earliest - 8 * 3_600_000) return null; // window predates history
+  const inHold = path.filter((p) => p.tsMs > fromMs && p.tsMs <= toMs);
+  return inHold.reduce((s, p) => s + p.rate, 0) * 100;
+}
+
 interface Realized {
   realizedPct: number; // P&L modelling the stop + timeout (1x, %)
   exit: "stop" | "timeout" | "open";
   maePct: number; // peak adverse (price up = bad for short) over the window
   mfePct: number; // peak favorable (price down = good) over the window
   holdH: number; // hours held to stop / timeout / now
-  estFundingPct: number; // est funding drag over the hold (%, negative = paid)
+  estFundingPct: number; // funding drag over the hold (%, negative = paid)
+  fundingReal: boolean; // true = from actual settlement path; false = capped est
   netPct: number; // realized + funding (1x, %)
 }
 
@@ -177,6 +253,7 @@ function realizedOutcome(
   firedAtMs: number,
   fundingApr: number,
   path: Map<number, OHLC>,
+  fundingPath: FundingPoint[],
   nowMs: number,
 ): Realized | null {
   const stopPx = entry * (1 + STOP_PCT / 100);
@@ -214,7 +291,16 @@ function realizedOutcome(
     exit = "open";
     holdH = ageH;
   }
-  const fundingDrag = estFundingPct(fundingApr, holdH);
+  // Funding over the ACTUAL hold from the real settlement path; fall back to the
+  // capped estimate only when history is unavailable for this window.
+  const exitMs =
+    stopMs !== null
+      ? stopMs
+      : ageH >= TIMEOUT_H
+        ? firedAtMs + TIMEOUT_H * 3_600_000
+        : nowMs;
+  const real = realFundingPct(fundingPath, firedAtMs, exitMs);
+  const fundingDrag = real !== null ? real : estFundingPct(fundingApr, holdH);
   return {
     realizedPct,
     exit,
@@ -222,6 +308,7 @@ function realizedOutcome(
     mfePct,
     holdH,
     estFundingPct: fundingDrag,
+    fundingReal: real !== null,
     netPct: realizedPct + fundingDrag,
   };
 }
@@ -325,11 +412,13 @@ function printSection(title: string, scored: Scored[]): void {
     stops = 0,
     timeouts = 0,
     open = 0,
-    blocked = 0;
+    blocked = 0,
+    capped = 0;
 
   for (const { sig, r, cooldownBlocked } of scored) {
     const age = fmtAge(Date.now() - sig.firedAtMs);
     if (cooldownBlocked) blocked++;
+    if (r && !r.fundingReal) capped++;
     if (!r) {
       console.log(
         row(
@@ -360,7 +449,8 @@ function printSection(title: string, scored: Scored[]): void {
 
     const icon =
       (r.realizedPct > 2 ? "✅" : r.realizedPct < -3 ? "❌" : "😐") +
-      (cooldownBlocked ? "🔁" : "");
+      (cooldownBlocked ? "🔁" : "") +
+      (r.fundingReal ? "" : "✲"); // ✲ = capped fallback (no funding history)
     console.log(
       row(
         sig.coin,
@@ -387,9 +477,10 @@ function printSection(title: string, scored: Scored[]): void {
     );
     console.log(
       `  avg MAE +${(sumMae / nReal).toFixed(1)}%  |  ` +
-        `est funding drag ${fmtPct(sumFund / nReal)}  |  ` +
+        `funding drag ${fmtPct(sumFund / nReal)}  |  ` +
         `net avg ${fmtPct(sumNet / nReal)} (${fmtPct((sumNet / nReal) * 3)} @3x)` +
-        (blocked ? `  |  ${blocked} cooldown-blocked 🔁` : ""),
+        (blocked ? `  |  ${blocked} cooldown-blocked 🔁` : "") +
+        (capped ? `  |  ${capped} capped-fallback ✲` : ""),
     );
   }
 }
@@ -416,6 +507,17 @@ async function main() {
     signals = SEED_SIGNALS;
   }
 
+  // Filter to the tradeable population by default (see EXCLUDE_COINS / floor).
+  let excludedCount = 0;
+  if (!INCLUDE_UNTRADEABLE) {
+    const before = signals.length;
+    signals = signals.filter(
+      (s) =>
+        !EXCLUDE_COINS.has(s.coin) && s.fundingApr <= BUILDING_MIN_FUNDING_APR,
+    );
+    excludedCount = before - signals.length;
+  }
+
   const now = Date.now();
   const window = LOOKAHEAD_H * 3_600_000;
   const toShow = SHOW_ALL
@@ -432,6 +534,11 @@ async function main() {
     `${new Date().toISOString()}  |  window: ${LOOKAHEAD_H}h  |  ` +
       `model: ${STOP_PCT}% stop, ${TIMEOUT_H}h timeout (Bybit klines)`,
   );
+  console.log(
+    INCLUDE_UNTRADEABLE
+      ? `  scope: ALL signals (--include-untradeable)`
+      : `  scope: tradeable only — excluded ${excludedCount} (H + funding > ${BUILDING_MIN_FUNDING_APR}%); --include-untradeable to show all`,
+  );
 
   // Score signals, then display. In active-only mode, limit scoring to the
   // display window plus a 48h pre-roll (cooldown 24h + max hold 24h) so the
@@ -440,7 +547,10 @@ async function main() {
   const scoreCutoff = SHOW_ALL ? -Infinity : now - (window + PREROLL_MS);
   const relevant = signals.filter((s) => s.firedAtMs >= scoreCutoff);
   const coins = Array.from(new Set(relevant.map((s) => s.coin)));
-  const klines = await fetchAllKlines(coins);
+  const [klines, funding] = await Promise.all([
+    fetchAllKlines(coins),
+    fetchAllFunding(coins),
+  ]);
   const scoredAll: Scored[] = relevant.map((sig) => ({
     sig,
     r: realizedOutcome(
@@ -448,6 +558,7 @@ async function main() {
       sig.firedAtMs,
       sig.fundingApr,
       klines.get(sig.coin) ?? new Map(),
+      funding.get(sig.coin) ?? [],
       now,
     ),
     cooldownBlocked: false,
@@ -464,8 +575,9 @@ async function main() {
   console.log(
     `\n  Realized = modelled with the executor's stop + timeout (not raw ` +
       `entry→now). MAE = peak adverse, MFE = peak favorable. 'net' = realized + ` +
-      `est funding (rate capped at ${(FUNDING_CAP_PER_8H * 100).toFixed(0)}%/8h, ` +
-      `an upper bound; exact = executor's fundingPaidUsdt). 🔁 = 24h cooldown skips it.`,
+      `funding integrated from ACTUAL Bybit settlement rates over the hold ` +
+      `(✲ = no history for that window → capped ${(FUNDING_CAP_PER_8H * 100).toFixed(0)}%/8h ` +
+      `estimate; exact realized = executor's fundingPaidUsdt). 🔁 = 24h cooldown skips it.`,
   );
   console.log();
 }
