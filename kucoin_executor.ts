@@ -936,12 +936,6 @@ async function managePositions(store: KucoinPositionStore): Promise<void> {
       const mfePct = ((pos.entryPx - maxFav) / pos.entryPx) * 100; // ≥0 best in favor
       const holdH = (nowMs - pos.openedAt) / 3_600_000;
       const rMultiple = finalPnlPct / (RISK.stopLossPct * 100); // stop = -1R
-      // Exit slippage (stops only): how far past the intended stop it actually
-      // filled — positive = filled worse (higher) than the stop trigger.
-      const exitSlipPct =
-        closeReason === "stop"
-          ? ((closePx - pos.stopLossPx) / pos.stopLossPx) * 100
-          : 0;
       // Realised funding over the hold (USDT; negative = paid). Shorts on
       // negative funding pay — a cost the backtest does not model.
       const fundingPaid = await fetchFundingPaid(symbol, pos.openedAt, nowMs);
@@ -973,15 +967,12 @@ async function managePositions(store: KucoinPositionStore): Promise<void> {
         pnlUsdc: finalPnlUsdt,
         pnlPct: finalPnlPct,
         closeReason,
-        // diagnostics
+        // diagnostics the web can't derive from the trade record (holdH,
+        // rMultiple, exitSlipPct are all computable client-side; entryPx /
+        // stopLossPx come from the matching "opened" event).
+        fundingPaidUsdt: fundingPaid,
         maePct,
         mfePct,
-        holdH,
-        rMultiple,
-        exitSlipPct,
-        fundingPaidUsdt: fundingPaid,
-        entryPx: pos.entryPx,
-        stopLossPx: pos.stopLossPx,
       });
 
       // All-in result: price P&L is what `pnlUsdc`/`rMultiple` measure, but a
@@ -1150,12 +1141,6 @@ async function executeSignal(
   };
   store.open[coin] = record;
 
-  // Open-time diagnostics for performance debugging.
-  const signalAgeSec = (record.openedAt - sig.firedAt) / 1000;
-  const venueDivergencePct = ((livePx - entry) / entry) * 100; // KuCoin vs signal
-  const fillGapPct = ((fillPx - entry) / entry) * 100; // fill vs signal
-  const estLiqDistPct = 100 / leverage; // ~liq distance for an isolated short
-
   await postSignalEvent("opened", {
     coin,
     signalType,
@@ -1163,17 +1148,11 @@ async function executeSignal(
     firedAt: sig.firedAt,
     openedAt: record.openedAt,
     entryPx: fillPx,
-    signalPx: entry,
     stopLossPx: stopPx,
     fundingApr: sig.fundingApr,
     notionalUsdc: notionalUsdt,
     leverage,
     isPaper: IS_PAPER,
-    // diagnostics
-    signalAgeSec,
-    venueDivergencePct,
-    fillGapPct,
-    estLiqDistPct,
   });
 
   // Round-up can push realized risk above target — flag it (informational).
