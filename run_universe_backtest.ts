@@ -238,8 +238,10 @@ async function main() {
         days: DAYS,
         // lookaheadHours — embedded so analysis tools derive the timeout from
         // the data instead of hardcoding it. A 24h-lookahead file simulates
-        // with 24h slot-holding automatically; a 72h file with 72h.
-        lookaheadHours: parseInt(LOOKAHEAD ?? "48"),
+        // with 24h slot-holding automatically; a 72h file with 72h. Default 24
+        // MUST match the --lookahead passed in PARAMS above (and live timeoutH);
+        // they were out of sync (PARAMS 24, metadata 48), mislabeling the file.
+        lookaheadHours: parseInt(LOOKAHEAD ?? "24"),
         coins: allCoins,
       },
       null,
