@@ -110,6 +110,15 @@ const BUILDING_REFIRE_MULTIPLIER = 2.0;
 // split with matched drawdown. Looser floors (-150/-120) added drawdown without
 // robust return gain: rejected. See CLAUDE.md "Validated signal parameters".
 const MIN_FUNDING_APR = -180;
+// Funding CEILING: BUILDING is too extreme to trade beyond this. Validated
+// 2026-06-14 on the 24h universe with INTEGRATED funding: the ≤-2000% band wins
+// most on price (80%) but is a NET LOSER all-in (-0.19R) — carry overwhelms it.
+// Adding the ceiling lifted funding-adjusted return +228%→+526% and cut MaxDD
+// -62%→-23%, robust across BOTH out-of-sample halves with -2000% the best
+// threshold in each. Supersedes the old win-rate-era "capping extreme funding
+// rejected" note. BUILDING auto-traded iff MAX_EXTREME < funding ≤ MIN. See
+// HISTORY.md → Funding ceiling.
+const MAX_EXTREME_FUNDING_APR = -2000;
 const MIN_EXHAUSTION_GAP_H = 6; // Exhaustion re-fire minimum gap (hours)
 const STATE_FILE = "scanner_state.json";
 const BB_BASE = "https://api.bybit.com";
@@ -827,10 +836,15 @@ function formatAlert(alert: Alert): string {
   if (alert.type === "EXHAUSTION" && alert.confidence === "HIGH")
     lines.push("", `📐 Short entry: stop at -15% | target -15% to -40%`);
   if (alert.type === "BUILDING") {
-    // BUILDING is auto-traded when funding ≤ -180% APR (validated profitable
-    // regime: 9/9 winners). Above that threshold it's informational only —
-    // mega-squeezes have run another 80%+ before reversing.
-    if (alert.fundingApr <= MIN_FUNDING_APR) {
+    // BUILDING is auto-traded only in the validated band: funding ≤ -180% APR
+    // but NOT beyond -2000% (where carry makes it a net-losing mega-squeeze
+    // trap). Outside the band it's informational only.
+    if (alert.fundingApr <= MAX_EXTREME_FUNDING_APR) {
+      lines.push(
+        "",
+        `🛑 Too extreme (${alert.fundingApr.toFixed(0)}% APR): mega-squeeze trap — NOT traded (carry > edge)`,
+      );
+    } else if (alert.fundingApr <= MIN_FUNDING_APR) {
       lines.push("", `📐 Short entry: extreme funding squeeze (auto-queued)`);
     } else {
       lines.push("", `⏳ Do NOT short yet: await exhaustion signal`);
@@ -948,11 +962,15 @@ async function main(): Promise<void> {
     // Queue tradeable signals for the executor.
     //   • PUMP_TOP: validated tradeable signal (universe backtest: 76% win).
     //   • TREND_BREAK (HIGH/MEDIUM): parabolic blow-off short.
-    //   • BUILDING with fundingApr ≤ -180% APR (MIN_FUNDING_APR): validated
-    //     profitable. Floor loosened -200 → -180 on 2026-06-07: the -180..-200
-    //     band was the highest-win-rate marginal slice (82% win) and beat -200
-    //     on return in a 120d out-of-sample split with matched drawdown. Looser
+    //   • BUILDING in the validated band -2000% < fundingApr ≤ -180% APR.
+    //     Floor (-180, MIN_FUNDING_APR) loosened -200 → -180 on 2026-06-07: the
+    //     -180..-200 band was the highest-win-rate marginal slice (82% win) and
+    //     beat -200 on return in a 120d OOS split with matched drawdown. Looser
     //     floors (-150/-120) added drawdown without robust gain: rejected.
+    //     Ceiling (-2000, MAX_EXTREME_FUNDING_APR) added 2026-06-14: the ≤-2000%
+    //     band wins most on price but is a net loser after carry; capping it
+    //     lifted funding-adjusted return +228%→+526% and cut MaxDD -62%→-23%,
+    //     robust across both OOS halves. See HISTORY.md → Funding ceiling.
     //   • EXHAUSTION: queueing SUSPENDED. Universe backtest showed negative
     //     realized P&L (-20% to -4%/trade, 86% stopped): the detector fires
     //     while squeezes are still accelerating. Telegram alerts still fire
@@ -965,8 +983,13 @@ async function main(): Promise<void> {
         alert.type === "TREND_BREAK" &&
         (alert.confidence === "HIGH" || alert.confidence === "MEDIUM");
 
+      // BUILDING queued only in the validated band: funding extreme enough
+      // (≤ MIN_FUNDING_APR) but NOT a mega-squeeze trap (> MAX_EXTREME_FUNDING_APR,
+      // where carry turns it net-negative — see the ceiling validation).
       const isExtremeBuilding =
-        alert.type === "BUILDING" && alert.fundingApr <= MIN_FUNDING_APR;
+        alert.type === "BUILDING" &&
+        alert.fundingApr <= MIN_FUNDING_APR &&
+        alert.fundingApr > MAX_EXTREME_FUNDING_APR;
 
       // PUMP_TOP fires at HIGH confidence and is a validated tradeable signal
       // (universe backtest: 76% win rate). Always queued for the executor.

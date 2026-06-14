@@ -108,7 +108,8 @@ interface Config {
   exhaustMaxFundingApr: number; // funding must be ABOVE this to count as exhaustion (default -20%)
   exhaustMinOiDrop: number; // OI must have dropped this % for exhaustion to fire (0 = disabled)
   squeezeMinOiDrop: number;
-  buildingMinFundingApr: number; // BUILDING queued only if funding ≤ this (Strategy B filter, default -180%)
+  buildingMinFundingApr: number; // BUILDING queued only if funding ≤ this (Strategy B floor, default -180%)
+  buildingMaxExtremeFundingApr: number; // ...and only if funding > this (ceiling, default -2000%): beyond it carry makes BUILDING a net loser
   trendFilter: boolean;
   trendDays7Pct: number;
   trendDays14Pct: number;
@@ -2366,7 +2367,12 @@ function collectQueuedSignals(
       hadOiData: sig.hadOiData,
     };
     if (sig.signalPhase === "BUILDING") {
-      if (sig.fundingApr <= config.buildingMinFundingApr) {
+      // Queued only in the validated band: extreme enough (≤ floor) but not a
+      // mega-squeeze trap (> ceiling, where carry turns it net-negative).
+      if (
+        sig.fundingApr <= config.buildingMinFundingApr &&
+        sig.fundingApr > config.buildingMaxExtremeFundingApr
+      ) {
         queued.push(entry);
       } else {
         blockedBuilding.push(entry);
@@ -2400,7 +2406,10 @@ function isOutcomeQueued(o: Outcome, config: Config): boolean {
   if (o.signalType === "SQUEEZE") {
     const sig = o.signal as unknown as SqueezeSignal;
     if (sig.signalPhase === "BUILDING") {
-      return sig.fundingApr <= config.buildingMinFundingApr;
+      return (
+        sig.fundingApr <= config.buildingMinFundingApr &&
+        sig.fundingApr > config.buildingMaxExtremeFundingApr
+      );
     }
     if (sig.signalPhase === "TREND_BREAK") return true;
     // EXHAUSTION — queueing SUSPENDED (see EXHAUSTION_QUEUEING_ENABLED).
@@ -2418,7 +2427,7 @@ function printQueuedSummary(results: CoinResult[], config: Config): void {
   console.log(
     `  Rule: PUMP_TOP and TREND_BREAK always queued.\n` +
       `        EXHAUSTION queueing SUSPENDED (negative realized P&L — under review).\n` +
-      `        BUILDING queued only if funding ≤ ${config.buildingMinFundingApr}% APR (Strategy B).\n` +
+      `        BUILDING queued only if ${config.buildingMaxExtremeFundingApr}% < funding ≤ ${config.buildingMinFundingApr}% APR (Strategy B: floor + ceiling).\n` +
       `        FUNDING signals are informational — never queued.`,
   );
 
@@ -3171,7 +3180,8 @@ interface Args {
   exhaustMaxFundingApr: number; // funding must be ABOVE this to count as exhaustion (default -20%)
   exhaustMinOiDrop: number; // OI must have dropped this % for exhaustion to fire (0 = disabled)
   squeezeMinOiDrop: number;
-  buildingMinFundingApr: number; // BUILDING queued only if funding ≤ this (Strategy B filter, default -180%)
+  buildingMinFundingApr: number; // BUILDING queued only if funding ≤ this (Strategy B floor, default -180%)
+  buildingMaxExtremeFundingApr: number; // ...and only if funding > this (ceiling, default -2000%): beyond it carry makes BUILDING a net loser
   trendFilter: boolean;
   trendDays7Pct: number;
   trendDays14Pct: number;
@@ -3214,6 +3224,9 @@ function parseArgs(): Args {
     exhaustMinOiDrop: parseFloat(g("--exhaust-oi-drop", "3")), // validated: 3%
     squeezeMinOiDrop: parseFloat(g("--squeeze-oi-drop", "0")), // validated: 0%
     buildingMinFundingApr: parseFloat(g("--building-min-funding", "-180")), // Strategy B: BUILDING queued only if funding ≤ this (loosened -200→-180 2026-06-07; see CLAUDE.md)
+    buildingMaxExtremeFundingApr: parseFloat(
+      g("--building-max-extreme-funding", "-2000"),
+    ), // Ceiling: BUILDING NOT queued if funding ≤ this (added 2026-06-14; beyond -2000% carry makes it a net loser — see CLAUDE.md/HISTORY.md)
     dataSource: g("--source", "bybit") as "bybit" | "binance" | "hl",
     trendFilter: !a.includes("--no-trend-filter"),
     trendDays7Pct: parseFloat(g("--trend-7d", "30")),

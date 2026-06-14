@@ -100,8 +100,10 @@ Each tested on the full universe and rejected on the data:
   rate moved 73%→73%/74%; the removed signals were net-positive. Tested three ways including
   realized P&L. The parabolic pump-tops earned money as a group; with the stop in place, the
   catastrophic outliers (e.g. RAVE's +359% adverse) are capped at -1R anyway.
-- **Cap / tighten extreme funding for BUILDING** — funding-band win rate bounces 63–79% with
-  no trend; the -2000%+ band ties for best (~79%). No mechanism to act on.
+- **Cap / tighten extreme funding for BUILDING** — ⚠️ **REVERSED 2026-06-14.** This was
+  rejected on **win rate** (the -2000%+ band ties for best, ~79–80%). That data was incomplete:
+  funding was not modelled. With integrated funding the deepest band is a net loser, and a
+  `-2000%` ceiling is now adopted. See "Funding ceiling" below.
 - **OI-rising gate on BUILDING** — 100% OI coverage in the test; the gate removed 14 signals
   (13 winners, 1 loser), win rate 73%→72%. It is anti-selective — it removes the violent
   mega-squeezes that do reverse.
@@ -110,6 +112,33 @@ Each tested on the full universe and rejected on the data:
 
 General lesson: win rate can almost always be nudged up by cutting trades, and almost always
 loses money doing so. Judge changes on realized P&L and drawdown, not win rate.
+
+## Funding ceiling (2026-06-14)
+
+BUILDING is now queued only in a **band**: `-2000% < fundingApr ≤ -180%`. The `-2000%` ceiling
+(`MAX_EXTREME_FUNDING_APR` in `live_scanner.ts` + both executors; `buildingMaxExtremeFundingApr`
+in `backtest_signals.ts`) was added after the funding-cost work made realized P&L measurable.
+
+**Why it was missed before.** Earlier analysis judged extreme funding on **win rate**, where the
+`≤-2000%` band looks great (~80% win, lowest adverse excursion). But funding was never modelled.
+Once realized funding was integrated from the actual per-settlement path (matching live KuCoin
+fills — e.g. ASTR -1.67% modelled vs -1.65% paid), the picture inverted.
+
+**The evidence** (24h universe, integrated funding, live risk):
+
+- Per-trade all-in R by funding band (BUILDING): every band from -180% to -2000% is solidly
+  net-positive (+0.22 to +0.35R), but the `≤-2000%` band is a **net loser (-0.19R)** despite the
+  highest price edge (+0.51R, 80% win) — carry (-0.70R) overwhelms it. The carry is front-loaded
+  (most paid in the first 24h), so it does not shrink at the live timeout.
+- Portfolio (funding-adjusted, `simulate_portfolio.ts` ceiling sweep): a `-2000%` ceiling lifted
+  return **+228%→+526%** and cut MaxDD **-62%→-23%**. Out-of-sample: neutral-to-positive in the
+  first half (few bombs present), and in the second half flipped a **-19% / -62% MaxDD** disaster
+  to **+42% / -19% MaxDD**. `-2000%` was the best threshold in BOTH halves.
+
+So the ceiling is as much drawdown insurance as a return boost — the -62% baseline drawdowns
+*are* the extreme-funding mega-squeezes. Re-validate (return + drawdown + OOS, never win rate)
+before moving the threshold. Tooling: `analyze_stops.ts` (all-in R by funding band) and
+`simulate_portfolio.ts --split` (ceiling sweep, OOS).
 
 ## Architecture deep reference
 

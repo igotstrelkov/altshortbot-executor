@@ -46,6 +46,12 @@ const NO_TREND = process.argv.includes("--no-trend-filter");
 const bmfIdx = process.argv.indexOf("--building-min-funding");
 const BUILDING_MIN_FUNDING = bmfIdx >= 0 ? process.argv[bmfIdx + 1] : null;
 
+// --building-max-extreme-funding <N>: overrides the validated -2000% BUILDING
+// CEILING. Pass 0 to DISABLE the ceiling (queue all extreme funding) — needed to
+// re-study the ≤-2000% band, since the default now blocks it. Own result file.
+const bmxIdx = process.argv.indexOf("--building-max-extreme-funding");
+const BUILDING_MAX_EXTREME = bmxIdx >= 0 ? process.argv[bmxIdx + 1] : null;
+
 // --lookahead <N>: overrides the validated 24h outcome window. Signal DETECTION
 // is unchanged (lookahead only affects per-signal outcome math), so three runs
 // at 24/48/72 produce identical queued signal sets with different outcomes —
@@ -57,9 +63,11 @@ const RESULT_FILE = NO_TREND
   ? "universe_result_notrend.json"
   : BUILDING_MIN_FUNDING !== null
     ? `universe_result_bmf${BUILDING_MIN_FUNDING}.json`
-    : LOOKAHEAD !== null
-      ? `universe_result_lookahead${LOOKAHEAD}.json`
-      : "universe_result.json";
+    : BUILDING_MAX_EXTREME !== null
+      ? `universe_result_bmx${BUILDING_MAX_EXTREME}.json`
+      : LOOKAHEAD !== null
+        ? `universe_result_lookahead${LOOKAHEAD}.json`
+        : "universe_result.json";
 
 // Validated parameters — must match live_scanner.ts PARAMS exactly.
 const PARAMS = [
@@ -97,6 +105,10 @@ const PARAMS = [
   // BUILDING queue gate — validated value is -180; --building-min-funding overrides.
   "--building-min-funding",
   BUILDING_MIN_FUNDING ?? "-180",
+  // BUILDING funding ceiling — validated value is -2000; override (e.g. 0 to
+  // disable) to re-study the extreme band.
+  "--building-max-extreme-funding",
+  BUILDING_MAX_EXTREME ?? "-2000",
 ];
 
 interface QueuedDetail {
