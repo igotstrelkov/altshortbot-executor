@@ -231,6 +231,78 @@ function main() {
     );
   }
 
+  // ── BUILDING by funding band — does the edge SURVIVE funding at the extremes? ─
+  // run_universe_backtest's funding-band table is win-rate only; extreme funding
+  // wins MORE often but pays MORE carry. This is the definitive test of the
+  // -180% floor: if all-in R stays positive (or rises) as funding gets more
+  // extreme, the floor is vindicated on realized P&L; if it degrades, revisit.
+  // Bands mirror run_universe_backtest (APR is negative; lower = more extreme).
+  console.log("\n" + "─".repeat(72));
+  console.log(`  BUILDING BY FUNDING BAND — all-in R (stop ${LIVE_STOP}%)`);
+  console.log("─".repeat(72));
+  const BANDS: { lo: number; hi: number; label: string }[] = [
+    { lo: -350, hi: -180, label: "-180 to -350" },
+    { lo: -500, hi: -350, label: "-350 to -500" },
+    { lo: -1000, hi: -500, label: "-500 to -1000" },
+    { lo: -2000, hi: -1000, label: "-1000 to -2000" },
+    { lo: -Infinity, hi: -2000, label: "-2000 & below" },
+  ];
+  const building = all.filter((s) => s.type === "BUILDING");
+  for (const b of BANDS) {
+    const sub = building.filter(
+      (s) => s.fundingApr > b.lo && s.fundingApr <= b.hi,
+    );
+    if (!sub.length) {
+      console.log(`  ${b.label.padEnd(16)}    (no signals)`);
+      continue;
+    }
+    const s = runScenario(sub, LIVE_STOP);
+    console.log(
+      `  ${b.label.padEnd(16)} ${String(sub.length).padStart(4)}  ` +
+        `price ${sgnR(s.avgR)}  ` +
+        `fund ${sgnR(s.avgFundR)}  ` +
+        `all-in ${sgnR(s.avgAllInR)}  ` +
+        `win ${pct(s.wins, s.trades)}→${pct(s.winsAllIn, s.trades)}`,
+    );
+  }
+  // Verdict: the -180% floor is vindicated only if NO band turns net-negative
+  // after funding. A coarse moderate-vs-extreme average can hide a single losing
+  // band, so check each band's all-in R and report the worst one.
+  const bandStats = BANDS.map((b) => {
+    const sub = building.filter(
+      (s) => s.fundingApr > b.lo && s.fundingApr <= b.hi,
+    );
+    return { b, n: sub.length, allIn: runScenario(sub, LIVE_STOP).avgAllInR };
+  }).filter((x) => x.n > 0);
+  const losers = bandStats.filter((x) => x.allIn <= 0);
+  const deepestLoses = losers.some((x) => x.b.lo === -Infinity);
+  console.log("");
+  if (!losers.length) {
+    console.log(
+      `  Verdict: ✅ every funding band is net-positive all-in — -180% floor ` +
+        `vindicated on realized P&L (not just win rate).`,
+    );
+  } else {
+    const worst = losers.reduce((a, b) => (b.allIn < a.allIn ? b : a));
+    console.log(
+      `  Verdict: ${deepestLoses ? "🚨" : "⚠️"} ${losers.length} band(s) net-NEGATIVE ` +
+        `after carry — worst: ${worst.b.label} ${sgnR(worst.allIn)} all-in ` +
+        `(wins most on price, funding overwhelms it).`,
+    );
+    console.log(
+      `  ${
+        deepestLoses
+          ? "The DEEPEST-funding band is the loser → a funding CEILING (cap how " +
+            "extreme to trade) may beat the floor-only rule."
+          : "A mid band is the loser → likely noise; watch, do not act."
+      }`,
+    );
+    console.log(
+      `  ⚠️ CONFIRM at lookahead 24 first — this file is ${LOOKAHEAD_H}h, so carry is ` +
+        `~${(LOOKAHEAD_H / 24).toFixed(0)}× the live 24h hold and over-states the drag.`,
+    );
+  }
+
   // ── Trend-filter question, in realized P&L ─────────────────────────────────
   // Does dropping parabolic PUMP_TOPs help or hurt total realized R?
   console.log("\n" + "─".repeat(72));
