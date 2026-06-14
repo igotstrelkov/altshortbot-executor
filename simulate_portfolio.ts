@@ -68,6 +68,42 @@ const LIVE_RISK = 0.03;
 const SPLIT = process.argv.includes("--split");
 
 // Print the re-entry cooldown sweep for a given signal set.
+// Funding-ceiling sweep — the rigorous test of "stop trading the most extreme
+// negative-funding BUILDING". Run with funding ON (the ceiling's whole point is
+// removing trades that are net-positive on price but net-NEGATIVE after carry).
+// "none" = current behaviour (floor only). Compare Return AND MaxDD: a ceiling
+// earns its keep only if it lifts funding-adjusted return without worsening
+// drawdown. Use --split to check both calendar halves (out-of-sample).
+function printCeilingSweep(sigs: Signal[], title: string): void {
+  console.log("\n" + "─".repeat(72));
+  console.log(`  ${title}`);
+  console.log("─".repeat(72));
+  console.log(
+    `  ${"ceiling".padEnd(11)} ${"Drop".padStart(5)} ${"FinalEquity".padStart(13)} ` +
+      `${"Return".padStart(11)} ${"MaxDD".padStart(8)} ` +
+      `${"Trades".padStart(8)} ${"WinRate".padStart(8)}`,
+  );
+  for (const ceil of [-Infinity, -3000, -2500, -2000, -1500]) {
+    const dropped = sigs.filter(
+      (s) => s.type === "BUILDING" && s.fundingApr <= ceil,
+    ).length;
+    const r = simulate(sigs, LIVE_RISK, MAX_POSITIONS, STOP_PCT, 0, true, ceil);
+    const label = ceil === -Infinity ? "none(base)" : `≤${ceil}%`;
+    const tag = ceil === -Infinity ? " ←BASELINE" : "";
+    console.log(
+      `  ${label.padEnd(11)} ${String(dropped).padStart(5)} ` +
+        `${("$" + Math.round(r.finalEquity).toLocaleString()).padStart(13)} ` +
+        `${pct(r.returnPct).padStart(11)} ` +
+        `${("-" + r.maxDrawdownPct.toFixed(1) + "%").padStart(8)} ` +
+        `${String(r.trades).padStart(8)} ` +
+        `${((100 * r.wins) / Math.max(1, r.trades)).toFixed(0).padStart(7)}%${tag}`,
+    );
+  }
+  console.log(
+    `  (funding ON. A ceiling helps only if Return RISES and MaxDD does NOT worsen.)`,
+  );
+}
+
 function printCooldownSweep(sigs: Signal[], title: string): void {
   console.log("\n" + "─".repeat(72));
   console.log(`  ${title}`);
@@ -183,6 +219,7 @@ function simulate(
   stop: number = STOP_PCT,
   cooldownH: number = 0, // re-entry cooldown: skip a coin within N h of a stop-out
   includeFunding: boolean = false, // fold modeled funding into equity/drawdown
+  fundingCeiling: number = -Infinity, // skip BUILDING with fundingApr ≤ this (don't trade the most extreme carry)
 ): SimResult {
   let equity = START_EQUITY;
   let peakEquity = START_EQUITY;
@@ -227,6 +264,9 @@ function simulate(
 
   for (const sig of signals) {
     closeDue(sig.openMs); // free slots / realise P&L up to this signal's time
+    // Funding ceiling: never trade BUILDING above this carry extreme. Removed
+    // from consideration entirely (not a slot-full skip) — like a queue filter.
+    if (sig.type === "BUILDING" && sig.fundingApr <= fundingCeiling) continue;
     // Re-entry cooldown: skip if this coin stopped out within the window.
     if (cooldownH > 0) {
       const last = lastStopMs.get(sig.coin);
@@ -487,6 +527,32 @@ function main() {
       `\n  Read: compare each row to '0h'. The cooldown earns its keep only if it\n` +
         `  cuts MaxDD by more than it cuts Return — i.e. the re-entries it blocks\n` +
         `  were net losers.`,
+    );
+  }
+
+  // ── funding-ceiling sweep — should we STOP trading the most extreme carry? ──
+  if (SPLIT) {
+    const times = signals.map((s) => s.openMs);
+    const minT = Math.min(...times);
+    const mid = (minT + Math.max(...times)) / 2;
+    const firstHalf = signals.filter((s) => s.openMs < mid);
+    const secondHalf = signals.filter((s) => s.openMs >= mid);
+    printCeilingSweep(
+      firstHalf,
+      `FUNDING CEILING — FIRST HALF (${firstHalf.length} signals, out-of-sample)`,
+    );
+    printCeilingSweep(
+      secondHalf,
+      `FUNDING CEILING — SECOND HALF (${secondHalf.length} signals, out-of-sample)`,
+    );
+    console.log(
+      `\n  A ceiling is real only if it beats 'none' on BOTH halves (return up,\n` +
+        `  MaxDD not worse) and the best threshold agrees across halves.`,
+    );
+  } else {
+    printCeilingSweep(
+      signals,
+      `FUNDING-CEILING SWEEP  (BUILDING only; riskPerTrade ${(LIVE_RISK * 100).toFixed(0)}%, funding ON)`,
     );
   }
 
