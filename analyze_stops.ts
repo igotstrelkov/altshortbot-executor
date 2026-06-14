@@ -298,8 +298,10 @@ function main() {
       }`,
     );
     console.log(
-      `  ⚠️ CONFIRM at lookahead 24 first — this file is ${LOOKAHEAD_H}h, so carry is ` +
-        `~${(LOOKAHEAD_H / 24).toFixed(0)}× the live 24h hold and over-states the drag.`,
+      LOOKAHEAD_H > 24
+        ? `  ⚠️ CONFIRM at lookahead 24 first — this file is ${LOOKAHEAD_H}h, so carry is ` +
+            `~${(LOOKAHEAD_H / 24).toFixed(0)}× the live 24h hold and over-states the drag.`
+        : `  This IS the live ${LOOKAHEAD_H}h horizon — the drag is not over-stated; treat the finding as real (mind n).`,
     );
   }
 
