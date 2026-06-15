@@ -29,6 +29,10 @@ const SEED_MODE = process.argv.includes("--seed");
 // restores the full view.
 const EXCLUDE_COINS = new Set(["H"]);
 const BUILDING_MIN_FUNDING_APR = -180;
+// Funding CEILING (matches live_scanner/executors MAX_EXTREME_FUNDING_APR):
+// BUILDING beyond this is a net loser after carry and is NOT traded, so it must
+// not count as "tradeable" here either. Adopted 2026-06-14.
+const MAX_EXTREME_FUNDING_APR = -2000;
 const INCLUDE_UNTRADEABLE = process.argv.includes("--include-untradeable");
 
 interface BuildingSignal {
@@ -507,13 +511,17 @@ async function main() {
     signals = SEED_SIGNALS;
   }
 
-  // Filter to the tradeable population by default (see EXCLUDE_COINS / floor).
+  // Filter to the tradeable population by default: drop H, signals above the
+  // -180% floor, AND signals below the -2000% ceiling (live no longer trades
+  // those — extreme carry makes them net losers).
   let excludedCount = 0;
   if (!INCLUDE_UNTRADEABLE) {
     const before = signals.length;
     signals = signals.filter(
       (s) =>
-        !EXCLUDE_COINS.has(s.coin) && s.fundingApr <= BUILDING_MIN_FUNDING_APR,
+        !EXCLUDE_COINS.has(s.coin) &&
+        s.fundingApr <= BUILDING_MIN_FUNDING_APR &&
+        s.fundingApr > MAX_EXTREME_FUNDING_APR,
     );
     excludedCount = before - signals.length;
   }
@@ -537,7 +545,7 @@ async function main() {
   console.log(
     INCLUDE_UNTRADEABLE
       ? `  scope: ALL signals (--include-untradeable)`
-      : `  scope: tradeable only — excluded ${excludedCount} (H + funding > ${BUILDING_MIN_FUNDING_APR}%); --include-untradeable to show all`,
+      : `  scope: tradeable only — excluded ${excludedCount} (H + funding outside ${MAX_EXTREME_FUNDING_APR}%..${BUILDING_MIN_FUNDING_APR}%); --include-untradeable to show all`,
   );
 
   // Score signals, then display. In active-only mode, limit scoring to the
