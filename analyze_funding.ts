@@ -93,6 +93,10 @@ async function fetchFundingPaid(
   }
 }
 
+// ─── Main ────────────────────────────────────────────────────────────────────────
+// Wrapped in a function so the per-trade `await fetchFundingPaid` is not a
+// top-level await — tsx emits CJS on some Node setups, which rejects it.
+async function main(): Promise<void> {
 // ─── Load closed trades ──────────────────────────────────────────────────────────
 if (!existsSync(FILE)) {
   console.error(`Store file not found: ${FILE} (run on the VPS, or scp it here).`);
@@ -312,3 +316,9 @@ if (VERBOSE) {
     );
   }
 }
+}
+
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
