@@ -46,14 +46,20 @@ const flagVal = (name: string): string | undefined => {
 };
 const DAYS = flagVal("--days") ? parseFloat(flagVal("--days")!) : null;
 const FILE = flagVal("--file") ?? "kucoin_positions.json";
+// --refetch: estimate funding for trades that lack a stored fundingPaidUsdt by
+// summing KuCoin funding-history over the trade window. OFF by default — that
+// path does NOT filter historical windows reliably (it returns the same recent
+// total per symbol), so re-fetched values are untrustworthy. Trades closed since
+// the executor started persisting fundingPaidUsdt are exact and used regardless.
+const REFETCH = argv.includes("--refetch");
 
-// ─── KuCoin client (read-only: getFundingHistory) ───────────────────────────────
+// ─── KuCoin client (only needed for --refetch) ──────────────────────────────────
 const KEY = process.env.KUCOIN_API_KEY ?? "";
 const SECRET = process.env.KUCOIN_API_SECRET ?? "";
 const PASSPHRASE = process.env.KUCOIN_API_PASSPHRASE ?? "";
-if (!KEY || !SECRET || !PASSPHRASE) {
+if (REFETCH && (!KEY || !SECRET || !PASSPHRASE)) {
   console.error(
-    "Missing KuCoin creds. Run:  set -a; source .env; set +a  before this script.",
+    "--refetch needs KuCoin creds. Run:  set -a; source .env; set +a  first.",
   );
   process.exit(1);
 }
@@ -121,7 +127,10 @@ if (trades.length === 0) {
 console.log(
   `Analyzing ${trades.length} closed trade(s)` +
     (DAYS != null ? ` from the last ${DAYS}d` : "") +
-    ` from ${FILE}\nUsing funding stored on each record; re-fetching from KuCoin for older trades...\n`,
+    ` from ${FILE}\n` +
+    (REFETCH
+      ? "Using stored funding; re-fetching the rest from KuCoin (⚠️ unreliable — see --refetch).\n"
+      : "Using funding stored per trade only; trades without it are price-only (--refetch to estimate).\n"),
 );
 
 // ─── Enrich each trade with real funding ─────────────────────────────────────────
@@ -138,23 +147,28 @@ interface Enriched {
 }
 
 let refetched = 0;
+let noFunding = 0;
 const rows: Enriched[] = [];
 for (const t of trades) {
   const notional = t.sizeCoin * t.entryPx;
   const riskUsdt = STOP_LOSS_PCT * notional;
   const priceR = riskUsdt > 0 ? t.pnlUsdc / riskUsdt : 0;
-  // Prefer funding persisted on the record (kucoin_executor now stores it);
-  // only hit the exchange for older trades written before that field existed.
+  // Exact stored funding (kucoin_executor persists it per trade) is the only
+  // trustworthy source. Trades without it are price-only unless --refetch is
+  // set, and even then the funding-history sum is unreliable (see REFETCH).
   let fundingUsdt: number | null;
   if (t.fundingPaidUsdt != null) {
     fundingUsdt = t.fundingPaidUsdt;
-  } else {
+  } else if (REFETCH) {
     fundingUsdt = await fetchFundingPaid(
       toKucoinSymbol(t.coin),
       t.openedAt,
       t.closedAt,
     );
     if (fundingUsdt != null) refetched++;
+  } else {
+    fundingUsdt = null;
+    noFunding++;
   }
   const fundingR =
     fundingUsdt != null && riskUsdt > 0 ? fundingUsdt / riskUsdt : 0;
@@ -187,7 +201,16 @@ for (const r of rows) {
 }
 
 if (refetched > 0) {
-  console.log(`ℹ️  Re-fetched funding from KuCoin for ${refetched} older trade(s).\n`);
+  console.log(
+    `⚠️  Re-fetched funding for ${refetched} trade(s) via funding-history — UNRELIABLE ` +
+      `(same recent total per symbol); treat those funding values with suspicion.\n`,
+  );
+}
+if (noFunding > 0) {
+  console.log(
+    `ℹ️  ${noFunding} trade(s) have no stored funding → counted PRICE-ONLY. ` +
+      `Funding stats reflect only the ${rows.length - noFunding} trade(s) with exact stored funding.\n`,
+  );
 }
 
 const fundingNulls = rows.filter((r) => r.fundingUsdt == null).length;

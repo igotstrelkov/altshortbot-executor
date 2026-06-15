@@ -779,39 +779,47 @@ async function fetchFundingPaid(
 }
 
 /**
- * Actual exchange close price for the position on `symbol`, read from KuCoin's
- * closed-position history. The live close path otherwise records the poll-time
- * price (currentPx); when a stop fires on an intraday spike that retraces before
- * the next 5-min poll, currentPx UNDER-states the loss (a "stop" can look like
- * −0.5R when it really filled at the −1R stop level). This returns the real fill
- * so pnl/R/MAE match reality. We just triggered this position's close, so the
- * most recent close for the symbol is ours — no fragile timestamp-unit math.
- * Retries because a just-issued timeout market-close can lag in history.
- * Returns null on failure; the caller keeps currentPx as the fallback.
+ * The position KuCoin just closed for `symbol`, from closed-position history —
+ * returning BOTH the real fill price and the exact per-position funding fee.
+ * We just triggered this close, so the most recent close for the symbol is ours
+ * (no fragile timestamp-unit math). Retries because a just-issued timeout
+ * market-close can lag in history. Returns null on failure (callers fall back).
+ *
+ *  - closePrice: anchors pnl/R/MAE to the real fill. A stop can fire on an
+ *    intraday spike that retraces before the next 5-min poll, so the poll-time
+ *    currentPx under-states the loss.
+ *  - fundingFee: the exchange's EXACT funding for this position. KuCoin sign:
+ *    negative = the position PAID funding, positive = received — matching our
+ *    `fundingPaidUsdt` convention. This is far more reliable than summing
+ *    funding-history over a window (that path does not filter historical ranges
+ *    correctly, returning the same recent total for every call on a symbol).
+ *    VERIFY the sign on the first live close (a paid short should report
+ *    negative) before fully trusting; if flipped, negate Number(it.fundingFee).
  */
-async function fetchActualClosePrice(
+async function fetchClosedPosition(
   symbol: string,
   openedAtMs: number,
-): Promise<number | null> {
+): Promise<{ closePrice: number; fundingFee: number | null } | null> {
   if (IS_PAPER) return null;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const data = unwrap<{ items?: { closePrice?: string; closeTime?: number }[] }>(
+      const data = unwrap<{
+        items?: { closePrice?: string; closeTime?: number; fundingFee?: string }[];
+      }>(
         await client.getHistoryPositions({ symbol, from: openedAtMs }),
         `getHistoryPositions(${symbol})`,
       );
-      let bestPx: number | null = null;
-      let bestT = -1;
+      let best: { px: number; fee: number | null; t: number } | null = null;
       for (const it of data?.items ?? []) {
         const px = Number(it.closePrice);
         const t = Number(it.closeTime);
         if (!Number.isFinite(px) || px <= 0) continue;
-        if (t >= bestT) {
-          bestT = t;
-          bestPx = px;
+        if (!best || t >= best.t) {
+          const fee = Number(it.fundingFee);
+          best = { px, fee: Number.isFinite(fee) ? fee : null, t };
         }
       }
-      if (bestPx !== null) return bestPx;
+      if (best) return { closePrice: best.px, fundingFee: best.fee };
     } catch {
       /* transient — retry */
     }
@@ -917,14 +925,15 @@ async function managePositions(store: KucoinPositionStore): Promise<void> {
     }
 
     if (closeReason) {
-      // Anchor the close to the ACTUAL exchange fill, not the poll-time price.
-      // A stop can fire on an intraday spike that retraces before the next 5-min
-      // poll, so currentPx understates the loss; the real fill makes pnl/R/MAE
-      // exact. Falls back to currentPx (already set) if history is unavailable.
-      if (!IS_PAPER) {
-        const actualClose = await fetchActualClosePrice(symbol, pos.openedAt);
-        if (actualClose !== null) closePx = actualClose;
-      }
+      // One closed-position fetch gives BOTH the real fill price and the exact
+      // per-position funding fee. Anchoring to the real fill keeps pnl/R/MAE
+      // exact (a stop can fire on an intraday spike that retraces before the
+      // next 5-min poll, so currentPx understates the loss). Falls back to
+      // currentPx (already set) if history is unavailable.
+      const closedPos = !IS_PAPER
+        ? await fetchClosedPosition(symbol, pos.openedAt)
+        : null;
+      if (closedPos !== null) closePx = closedPos.closePrice;
 
       const finalPnlPct = ((pos.entryPx - closePx) / pos.entryPx) * 100;
       const finalPnlUsdt = (finalPnlPct / 100) * pos.notionalUsdc;
@@ -936,9 +945,14 @@ async function managePositions(store: KucoinPositionStore): Promise<void> {
       const mfePct = ((pos.entryPx - maxFav) / pos.entryPx) * 100; // ≥0 best in favor
       const holdH = (nowMs - pos.openedAt) / 3_600_000;
       const rMultiple = finalPnlPct / (RISK.stopLossPct * 100); // stop = -1R
-      // Realised funding over the hold (USDT; negative = paid). Shorts on
-      // negative funding pay — a cost the backtest does not model.
-      const fundingPaid = await fetchFundingPaid(symbol, pos.openedAt, nowMs);
+      // Realised funding for THIS position (USDT; negative = paid), exact from
+      // the closed-position record. Fall back to the funding-history sum only
+      // when the record/fee is unavailable — that sum does not window historical
+      // ranges reliably (it returns the same recent total per symbol).
+      const fundingPaid =
+        closedPos?.fundingFee != null
+          ? closedPos.fundingFee
+          : await fetchFundingPaid(symbol, pos.openedAt, nowMs);
 
       const trade: PaperTrade = {
         coin,
