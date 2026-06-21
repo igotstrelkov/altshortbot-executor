@@ -918,6 +918,24 @@ function isTrendingFull(
   return rise7d >= config.trendDays7Pct && rise14d >= config.trendDays14Pct;
 }
 
+// Price run-up into the signal: % change over the 7d / 14d before fire (from
+// priceByHour). A proxy for "is the coin already ripping" — emitted per signal
+// to test whether shorting a BUILDING mid-violent-uptrend stops out more. null
+// when the lookback window has no price history. EXPERIMENT ONLY: not gated.
+function runupAtFire(
+  ts: number,
+  priceByHour: Record<number, number>,
+): { r7: number | null; r14: number | null } {
+  const now = priceByHour[ts];
+  if (!now || now <= 0) return { r7: null, r14: null };
+  const a7 = priceByHour[ts - 7 * 24 * 3600_000];
+  const a14 = priceByHour[ts - 14 * 24 * 3600_000];
+  return {
+    r7: a7 > 0 ? ((now - a7) / a7) * 100 : null,
+    r14: a14 > 0 ? ((now - a14) / a14) * 100 : null,
+  };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Gate logic (1h resolution)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2257,6 +2275,10 @@ interface QueuedEntry {
   // Funding % over the hold each sweep stop implies (negative = short pays),
   // integrated from the actual per-settlement path — see computeFundingPctByStop.
   fundingPctByStop: Record<string, number>;
+  // Price run-up % into the signal (7d/14d before fire) — experiment: does
+  // shorting a coin already in a violent uptrend stop out more? null = no data.
+  runup7dPct: number | null;
+  runup14dPct: number | null;
   oiDropPct?: number; // BUILDING only: OI drop % at fire (negative = OI rising)
   hadOiData?: boolean; // BUILDING only: OI history available — OI gate evaluable
   trendingAtFire?: boolean; // PUMP_TOP only: coin parabolic when signal fired
@@ -2338,6 +2360,8 @@ function collectQueuedSignals(
         o.stopHitH,
         config.lookaheadHours,
       ),
+      runup7dPct: runupAtFire(floorH(sig.firedAtMs), result.priceByHour).r7,
+      runup14dPct: runupAtFire(floorH(sig.firedAtMs), result.priceByHour).r14,
       trendingAtFire: sig.trendingAtFire,
     });
   }
@@ -2363,6 +2387,8 @@ function collectQueuedSignals(
         o.stopHitH,
         config.lookaheadHours,
       ),
+      runup7dPct: runupAtFire(floorH(sig.firedAtMs), result.priceByHour).r7,
+      runup14dPct: runupAtFire(floorH(sig.firedAtMs), result.priceByHour).r14,
       oiDropPct: sig.oiDropPct,
       hadOiData: sig.hadOiData,
     };
@@ -3053,6 +3079,9 @@ function saveJSON(results: CoinResult[], config: Config): void {
               minPct: Math.round(q.minPricePct * 100) / 100,
               stopHitH: q.stopHitH,
               fundingPctByStop: q.fundingPctByStop,
+              runup7dPct: q.runup7dPct == null ? null : Math.round(q.runup7dPct),
+              runup14dPct:
+                q.runup14dPct == null ? null : Math.round(q.runup14dPct),
               verdict: q.verdict,
               trendingAtFire: q.trendingAtFire ?? false,
               oiDropPct: q.oiDropPct ?? 0,

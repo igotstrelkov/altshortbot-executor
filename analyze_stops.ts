@@ -59,6 +59,10 @@ interface QueuedDetail {
   // integrated from the actual settlement path by run_universe_backtest. Absent
   // in older result files → fall back to the constant-APR estimate.
   fundingPctByStop?: Record<string, number>;
+  // Price run-up % into the signal (experiment: does shorting a coin already in
+  // a violent uptrend stop out more?). Absent in older result files.
+  runup7dPct?: number | null;
+  runup14dPct?: number | null;
 }
 
 const ANNUAL_HOURS = 8760;
@@ -302,6 +306,48 @@ function main() {
         ? `  ⚠️ CONFIRM at lookahead 24 first — this file is ${LOOKAHEAD_H}h, so carry is ` +
             `~${(LOOKAHEAD_H / 24).toFixed(0)}× the live 24h hold and over-states the drag.`
         : `  This IS the live ${LOOKAHEAD_H}h horizon — the drag is not over-stated; treat the finding as real (mind n).`,
+    );
+  }
+
+  // ── BUILDING by 7d run-up — does shorting into a violent uptrend stop more? ─
+  // EXPERIMENT (CLAUDE.md: judge on realized P&L, not win rate). If higher
+  // run-up bands show higher stop% AND worse all-in R, a momentum gate is worth
+  // testing OOS; if all-in R holds flat, the loser profile is not about momentum.
+  const buildingRu = building.filter((s) => s.runup7dPct != null);
+  if (buildingRu.length) {
+    console.log("\n" + "─".repeat(72));
+    console.log(`  BUILDING BY 7d RUN-UP — stop% + all-in R (stop ${LIVE_STOP}%)`);
+    console.log("─".repeat(72));
+    const RU: { lo: number; hi: number; label: string }[] = [
+      { lo: -Infinity, hi: 0, label: "≤0% (falling)" },
+      { lo: 0, hi: 25, label: "0–25%" },
+      { lo: 25, hi: 50, label: "25–50%" },
+      { lo: 50, hi: 100, label: "50–100%" },
+      { lo: 100, hi: Infinity, label: ">100%" },
+    ];
+    for (const b of RU) {
+      const sub = buildingRu.filter(
+        (s) => s.runup7dPct! > b.lo && s.runup7dPct! <= b.hi,
+      );
+      if (!sub.length) {
+        console.log(`  ${b.label.padEnd(14)}    (none)`);
+        continue;
+      }
+      const s = runScenario(sub, LIVE_STOP);
+      console.log(
+        `  ${b.label.padEnd(14)} ${String(sub.length).padStart(4)}  ` +
+          `stop ${pct(s.stopped, s.trades).padStart(4)}  ` +
+          `price ${sgnR(s.avgR)}  ` +
+          `all-in ${sgnR(s.avgAllInR)}  ` +
+          `win ${pct(s.wins, s.trades)}→${pct(s.winsAllIn, s.trades)}`,
+      );
+    }
+    const noRu = building.length - buildingRu.length;
+    console.log(
+      `\n  Read: if stop% climbs and all-in R falls as run-up rises, a momentum\n` +
+        `  ceiling (skip BUILDING when 7d run-up > X%) is worth an OOS test. Flat\n` +
+        `  all-in across bands ⇒ momentum is NOT the separator.` +
+        (noRu ? `  (${noRu} signal(s) lacked run-up data.)` : ""),
     );
   }
 
