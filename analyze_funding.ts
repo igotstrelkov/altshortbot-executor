@@ -150,7 +150,14 @@ let refetched = 0;
 let noFunding = 0;
 const rows: Enriched[] = [];
 for (const t of trades) {
-  const notional = t.sizeCoin * t.entryPx;
+  // True notional from the realized-P&L relationship (pnlUsdc = pnlPct% ×
+  // notional) — independent of sizeCoin's contract-vs-coin units. sizeCoin ×
+  // entryPx under-counts for coins with a contract multiplier ≠ 1 (e.g. PORTAL),
+  // which blows up fundR/%-8h. Fall back to sizeCoin × entryPx only at ~0 pnlPct.
+  const notional =
+    Math.abs(t.pnlPct) > 1e-9
+      ? Math.abs(t.pnlUsdc / (t.pnlPct / 100))
+      : t.sizeCoin * t.entryPx;
   const riskUsdt = STOP_LOSS_PCT * notional;
   const priceR = riskUsdt > 0 ? t.pnlUsdc / riskUsdt : 0;
   // Exact stored funding (kucoin_executor persists it per trade) is the only
