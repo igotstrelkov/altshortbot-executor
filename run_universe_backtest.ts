@@ -29,7 +29,8 @@ const MIN_PRICE_USDC = 0.001;
 const EXCLUDE = new Set(["BTC", "ETH", "BNB", "BTCDOM", "FIDA", "H"]);
 
 const argDays = process.argv[process.argv.indexOf("--days") + 1];
-const DAYS = process.argv.includes("--days") ? parseInt(argDays) : 60;
+const DAYS_OVERRIDE = process.argv.includes("--days");
+const DAYS = DAYS_OVERRIDE ? parseInt(argDays) : 60;
 const argBatch = process.argv[process.argv.indexOf("--batch") + 1];
 const BATCH = process.argv.includes("--batch") ? parseInt(argBatch) : 25;
 
@@ -67,7 +68,11 @@ const RESULT_FILE = NO_TREND
       ? `universe_result_bmx${BUILDING_MAX_EXTREME}.json`
       : LOOKAHEAD !== null
         ? `universe_result_lookahead${LOOKAHEAD}.json`
-        : "universe_result.json";
+        : DAYS_OVERRIDE
+          ? // recent-window run (e.g. --days 30) → own file, never clobbers the
+            // 60-day baseline. Use to test regime-dip vs edge-decay.
+            `universe_result_days${DAYS}.json`
+          : "universe_result.json";
 
 // Validated parameters — must match live_scanner.ts PARAMS exactly.
 const PARAMS = [
