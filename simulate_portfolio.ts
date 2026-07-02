@@ -104,6 +104,50 @@ function printCeilingSweep(sigs: Signal[], title: string): void {
   );
 }
 
+// Momentum-ceiling sweep — test "skip BUILDING already run up > X% over 7d".
+// Funding ON. A real edge lifts Return without worsening MaxDD, on BOTH halves
+// (--split). "none" = current behaviour. Only signals with known run-up are
+// filtered; new-listing / early-window (null run-up) are always kept.
+function printRunupSweep(sigs: Signal[], title: string): void {
+  console.log("\n" + "─".repeat(72));
+  console.log(`  ${title}`);
+  console.log("─".repeat(72));
+  console.log(
+    `  ${"runup≤".padEnd(11)} ${"Drop".padStart(5)} ${"FinalEquity".padStart(13)} ` +
+      `${"Return".padStart(11)} ${"MaxDD".padStart(8)} ` +
+      `${"Trades".padStart(8)} ${"WinRate".padStart(8)}`,
+  );
+  for (const ru of [Infinity, 50, 25, 10]) {
+    const dropped = sigs.filter(
+      (s) => s.type === "BUILDING" && s.runup7dPct != null && s.runup7dPct > ru,
+    ).length;
+    const r = simulate(
+      sigs,
+      LIVE_RISK,
+      MAX_POSITIONS,
+      STOP_PCT,
+      0,
+      true,
+      -Infinity,
+      ru,
+    );
+    const label = ru === Infinity ? "none(base)" : `≤${ru}%`;
+    const tag = ru === Infinity ? " ←BASELINE" : "";
+    console.log(
+      `  ${label.padEnd(11)} ${String(dropped).padStart(5)} ` +
+        `${("$" + Math.round(r.finalEquity).toLocaleString()).padStart(13)} ` +
+        `${pct(r.returnPct).padStart(11)} ` +
+        `${("-" + r.maxDrawdownPct.toFixed(1) + "%").padStart(8)} ` +
+        `${String(r.trades).padStart(8)} ` +
+        `${((100 * r.wins) / Math.max(1, r.trades)).toFixed(0).padStart(7)}%${tag}`,
+    );
+  }
+  console.log(
+    `  (funding ON. A momentum ceiling is real only if Return RISES, MaxDD does\n` +
+      `   NOT worsen, and it holds on BOTH --split halves — else it's overfit.)`,
+  );
+}
+
 function printCooldownSweep(sigs: Signal[], title: string): void {
   console.log("\n" + "─".repeat(72));
   console.log(`  ${title}`);
@@ -146,6 +190,9 @@ interface QueuedDetail {
   // integrated from the actual settlement path by run_universe_backtest. Absent
   // in older result files → fall back to the constant-APR estimate.
   fundingPctByStop?: Record<string, number>;
+  // 7d price run-up % into the signal (from run_universe_backtest). Used to test
+  // a momentum ceiling (skip BUILDING already up > X%). Absent/null in older files.
+  runup7dPct?: number | null;
   verdict: string;
   trendingAtFire?: boolean;
 }
@@ -220,6 +267,7 @@ function simulate(
   cooldownH: number = 0, // re-entry cooldown: skip a coin within N h of a stop-out
   includeFunding: boolean = false, // fold modeled funding into equity/drawdown
   fundingCeiling: number = -Infinity, // skip BUILDING with fundingApr ≤ this (don't trade the most extreme carry)
+  runupMax: number = Infinity, // skip BUILDING whose 7d run-up > this (momentum ceiling)
 ): SimResult {
   let equity = START_EQUITY;
   let peakEquity = START_EQUITY;
@@ -267,6 +315,14 @@ function simulate(
     // Funding ceiling: never trade BUILDING above this carry extreme. Removed
     // from consideration entirely (not a slot-full skip) — like a queue filter.
     if (sig.type === "BUILDING" && sig.fundingApr <= fundingCeiling) continue;
+    // Momentum ceiling: skip BUILDING already run up > runupMax over 7d. Only
+    // filters signals with known run-up (new listings / early-window keep null).
+    if (
+      sig.type === "BUILDING" &&
+      sig.runup7dPct != null &&
+      sig.runup7dPct > runupMax
+    )
+      continue;
     // Re-entry cooldown: skip if this coin stopped out within the window.
     if (cooldownH > 0) {
       const last = lastStopMs.get(sig.coin);
@@ -553,6 +609,32 @@ function main() {
     printCeilingSweep(
       signals,
       `FUNDING-CEILING SWEEP  (BUILDING only; riskPerTrade ${(LIVE_RISK * 100).toFixed(0)}%, funding ON)`,
+    );
+  }
+
+  // ── momentum-ceiling sweep — should we skip BUILDING already ripping? ───────
+  if (SPLIT) {
+    const times = signals.map((s) => s.openMs);
+    const minT = Math.min(...times);
+    const mid = (minT + Math.max(...times)) / 2;
+    const firstHalf = signals.filter((s) => s.openMs < mid);
+    const secondHalf = signals.filter((s) => s.openMs >= mid);
+    printRunupSweep(
+      firstHalf,
+      `MOMENTUM CEILING — FIRST HALF (${firstHalf.length} signals, out-of-sample)`,
+    );
+    printRunupSweep(
+      secondHalf,
+      `MOMENTUM CEILING — SECOND HALF (${secondHalf.length} signals, out-of-sample)`,
+    );
+    console.log(
+      `\n  Momentum ceiling is real only if it beats 'none' on BOTH halves and\n` +
+        `  the best threshold agrees — else it's overfit to one period.`,
+    );
+  } else {
+    printRunupSweep(
+      signals,
+      `MOMENTUM-CEILING SWEEP  (skip BUILDING run-up > X%; riskPerTrade ${(LIVE_RISK * 100).toFixed(0)}%, funding ON)`,
     );
   }
 
