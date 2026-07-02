@@ -36,9 +36,17 @@ const RISK = {
 } as const;
 ```
 
-> KuCoin is the live venue (`kucoin_executor.ts`); its block uses `riskPerTrade 0.05`,
-> `maxPositions 5`. `bybit_executor.ts` mirrors the structure with `0.03` / `10`. The
-> `stopLossPct`, `timeoutH`, and `reentryCooldownH` values match across both.
+> KuCoin is the live venue (`kucoin_executor.ts`); its block uses `riskPerTrade 0.025`
+> (halved from `0.05` on 2026-07-02 — see below), `maxPositions 5`. `bybit_executor.ts`
+> mirrors the structure with `0.03` / `10`. The `stopLossPct`, `timeoutH`, and
+> `reentryCooldownH` values match across both.
+
+> **Sized down 2026-07-02:** BUILDING is a **high-variance, regime-dependent** edge
+> (+475% one month, −25% the next; +332% over 60d). In a squeeze-heavy regime (31% stop
+> rate) `riskPerTrade` was halved `0.05→0.025` to cut drawdown. `checkRollingHealth`
+> (executor) warns on Telegram once/day when the trailing-30-trade net R goes negative —
+> the objective trigger to pause or cut risk further. Raise risk back toward `0.05` when
+> win rate recovers. See HISTORY.md → Regime dependence.
 
 **Exits — only two.** A short closes on **stop** (price rose `stopLossPct` above entry) or
 **timeout** (24h elapsed, closed at live price). There is **no take-profit and no trailing
@@ -139,9 +147,14 @@ affects positions.
 ## Do not re-investigate these
 
 Tested on the full universe and **rejected on the data** (detail + numbers in `HISTORY.md`):
-trend-filtering PUMP_TOP, an OI-rising gate on BUILDING, and dropping PUMP_TOP / BUILDING-only.
-The signal layer (~73% queued win rate across 440 signals) is settled. Judge any future change
-on **realized P&L and drawdown**, never win rate alone.
+trend-filtering PUMP_TOP, an OI-rising gate on BUILDING, dropping PUMP_TOP / BUILDING-only, and
+a **7d run-up (momentum) ceiling on BUILDING** — regime-dependent, not robust: it rescues the
+squeeze-heavy regime (recent 30d: −25%→~breakeven, OOS-consistent) but **costs ~50pts in the
+normal regime** (60d: +332%→+283%), so it's a market-timing bet, not an edge. Kept as a monitor
+(`analyze_stops` run-up band; `simulate_portfolio` momentum sweep), never a live gate. Funding,
+OI, and listing-age also fail to separate stops from wins — **no at-entry filter robustly lifts
+BUILDING**. The signal layer (~73% queued win rate across 440 signals) is settled. Judge any
+future change on **realized P&L and drawdown**, never win rate alone.
 
 > **Reversed 2026-06-14:** "capping extreme funding" was previously listed here as rejected —
 > but that rejection was decided on **win rate** (the win-rate-era data was incomplete: no

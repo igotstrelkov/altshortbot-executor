@@ -140,6 +140,29 @@ So the ceiling is as much drawdown insurance as a return boost — the -62% base
 before moving the threshold. Tooling: `analyze_stops.ts` (all-in R by funding band) and
 `simulate_portfolio.ts --split` (ceiling sweep, OOS).
 
+## Regime dependence & the 2026-07-02 size-down
+
+BUILDING is a **high-variance, regime-dependent** edge, not a steady one. Portfolio sim
+(funding-adjusted): **60d +332%**, but that splits into ~**+475% one month, −25% the next**
+(prior 30d vs recent 30d). The recent regime is squeeze-heavy — 31% stop rate vs 20% validated,
+live/backtest win rate ~57% vs 74%. This is variance/regime, not a broken signal: the same
+strategy printed +475% one month earlier, and no diagnostic distinguishes a bad patch from decay
+on 30 days.
+
+**No at-entry filter fixes it.** Funding band, OI, listing-age, and 7d run-up (momentum) all
+fail to separate stops from wins on the 60d data (all-in R flat ~+0.2R across every split). The
+momentum filter *does* separate in the recent regime (run-up >25% → net-negative) and rescues it
+in an OOS split (−25%→~breakeven, −2000-style consistency), **but it costs ~50pts in the normal
+regime** (60d +332%→+283% at ≤25%) — so it's a market-timing bet, kept as a monitor only, never a
+live gate.
+
+**Response = discipline, not a new signal:** (1) `riskPerTrade` halved `0.05→0.025` to cut
+drawdown while the regime is bad — reversible; raise back when win rate recovers. (2)
+`checkRollingHealth` (executor) warns on Telegram once/day when trailing-30-trade net R goes
+negative — the objective pause/scale trigger, so the decision is a rule, not an emotional call in
+a drawdown. Tooling: `simulate_portfolio.ts --split` momentum sweep, `analyze_funding.ts` (live
+realized R), `run_universe_backtest.ts --days N` (recent-window backtest, own result file).
+
 ## Architecture deep reference
 
 ### Data sources

@@ -67,10 +67,16 @@ const CONVEX_INGEST_URL_DEV = process.env.CONVEX_INGEST_URL_DEV ?? "";
 const CONVEX_INGEST_SECRET = process.env.CONVEX_INGEST_SECRET ?? "";
 const CONVEX_OUTBOX_FILE = "convex_outbox.json";
 
-// Risk block — identical values to bybit_executor.ts. See CLAUDE.md.
+// Risk block. Mostly mirrors bybit_executor.ts, EXCEPT riskPerTrade (0.025 here
+// vs 0.03 there — sized down for the live venue; see below). See CLAUDE.md.
 const RISK = {
   maxLeverage: 3,
-  riskPerTrade: 0.05, // 5% account risk per trade
+  // 2.5% account risk per trade. Halved from 5% on 2026-07-02: BUILDING is a
+  // high-variance / regime-dependent edge (+475% one month, -25% the next) and
+  // the recent regime is squeeze-heavy (31% stop rate). Sizing down halves the
+  // drawdown while the regime is bad; raise back toward 5% when the rolling
+  // health check (checkRollingHealth) shows win rate recovering. See HISTORY.md.
+  riskPerTrade: 0.025,
   stopLossPct: 0.15, // 15% stop loss
   maxPositions: 5, // max concurrent open positions
   timeoutH: 24, // close after 24h regardless (validated 2026-05-28: 24h optimal vs 48h/72h)
@@ -424,6 +430,8 @@ interface KucoinPositionStore {
   open: PositionStore;
   closed: PaperTrade[];
   paperEquityUsdt: number;
+  // Last time the rolling-health warning fired (ms) — rate-limits it to once/day.
+  lastHealthAlertAt?: number;
 }
 
 function loadPositions(): KucoinPositionStore {
@@ -1241,6 +1249,54 @@ async function printStatus(store: KucoinPositionStore): Promise<void> {
 }
 
 // ─── Main ──────────────────────────────────────────────────────────────────────
+// ─── Rolling-health check ────────────────────────────────────────────────────
+// Enforce the "size down / pause if the edge stops working" rule in code, not
+// memory. Over the last N closed trades compute all-in R (price + funding) and
+// win rate; warn on Telegram (rate-limited to once/day) when the mean goes
+// negative — the objective trigger to consider pausing or cutting risk further.
+// Read-only except the rate-limit timestamp; never blocks trading.
+const HEALTH_WINDOW = 30; // trailing closed-trade count
+const HEALTH_MIN_N = 20; // need at least this many closes to judge
+const HEALTH_ALERT_COOLDOWN_MS = 24 * 3_600_000;
+
+async function checkRollingHealth(store: KucoinPositionStore): Promise<void> {
+  const recent = store.closed.slice(-HEALTH_WINDOW);
+  if (recent.length < HEALTH_MIN_N) return;
+  let sumR = 0;
+  let wins = 0;
+  for (const t of recent) {
+    const priceR = t.pnlPct / (RISK.stopLossPct * 100); // stop = -1R
+    // notional from realized P&L (units-independent — see analyze_funding).
+    const notional =
+      Math.abs(t.pnlPct) > 1e-9
+        ? Math.abs(t.pnlUsdc / (t.pnlPct / 100))
+        : t.sizeCoin * t.entryPx;
+    const riskUsdt = RISK.stopLossPct * notional;
+    const fundingR =
+      t.fundingPaidUsdt != null && riskUsdt > 0
+        ? t.fundingPaidUsdt / riskUsdt
+        : 0;
+    const totalR = priceR + fundingR;
+    sumR += totalR;
+    if (totalR > 0) wins++;
+  }
+  const meanR = sumR / recent.length;
+  const winPct = (100 * wins) / recent.length;
+  if (meanR >= 0) return; // edge still positive over the window — no alert
+  if (Date.now() - (store.lastHealthAlertAt ?? 0) < HEALTH_ALERT_COOLDOWN_MS)
+    return;
+  store.lastHealthAlertAt = Date.now();
+  await sendTelegram(
+    `⚠️ *altshortbot* rolling health: last ${recent.length} trades ` +
+      `net ${meanR.toFixed(2)}R/trade, ${winPct.toFixed(0)}% win — BELOW zero.\n` +
+      `The edge is not working in this regime. Consider pausing BUILDING or ` +
+      `cutting riskPerTrade further (now ${(RISK.riskPerTrade * 100).toFixed(1)}%).`,
+  );
+  console.log(
+    `  [HEALTH] last ${recent.length}: mean ${meanR.toFixed(2)}R, win ${winPct.toFixed(0)}% — alerted`,
+  );
+}
+
 async function main(): Promise<void> {
   console.log(`\nKuCoin Executor — ${new Date().toISOString()}`);
   console.log(`Mode: ${IS_PAPER ? "PAPER" : "LIVE"}`);
@@ -1272,6 +1328,9 @@ async function main(): Promise<void> {
   // Runs every cycle (not just when the store has positions): the whole point is
   // to find positions the store does NOT know about.
   await reconcilePositions(store);
+
+  // ── Rolling-health check — warn once/day if recent net R has gone negative ───
+  await checkRollingHealth(store);
 
   // ── Execute queued signals ──────────────────────────────────────────────────
   const queue = loadQueue();
