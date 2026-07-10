@@ -2294,15 +2294,11 @@ function exhaustionQueueable(msSinceBuilding: number | null): boolean {
   return msSinceBuilding / 3_600_000 >= 2;
 }
 
-// EXHAUSTION queueing is SUSPENDED pending investigation.
-// Universe backtest (584 coins, 60d): 7 queued EXHAUSTION signals, realized
-// P&L -20% to -4% per trade, 86% stopped out — the only signal type with
-// negative expectancy. The detector appears to fire while squeezes are still
-// accelerating (BSB +86%, PLAYSOUT +70% adverse AFTER the exhaustion signal).
-// This flag keeps EXHAUSTION detection/alerts intact but stops it being
-// queued for the executor. Re-enable once the detection logic is fixed and
-// re-validated on the full universe.
-const EXHAUSTION_QUEUEING_ENABLED = false;
+// REVERTED 2026-07-02 to the commit-9e34170 queue logic: EXHAUSTION queued,
+// PUMP_TOP NOT queued. (The backtest still shows the newer logic — PUMP_TOP in,
+// EXHAUSTION out — is better on the same data; reverted at operator request.)
+const EXHAUSTION_QUEUEING_ENABLED = true;
+const PUMP_TOP_QUEUEING_ENABLED = false;
 
 // Funding % over the hold each sweep stop implies, integrated from the ACTUAL
 // per-settlement funding path. fundingAprByHour is zero-filled at non-settlement
@@ -2341,8 +2337,8 @@ function collectQueuedSignals(
   const queued: QueuedEntry[] = [];
   const blockedBuilding: QueuedEntry[] = [];
 
-  // PUMP_TOP — always queued
-  for (const o of result.pumpOutcomes) {
+  // PUMP_TOP — queued only when enabled (reverted: NOT queued, see flag).
+  for (const o of PUMP_TOP_QUEUEING_ENABLED ? result.pumpOutcomes : []) {
     const sig = o.signal as PumpSignal;
     queued.push({
       firedAtStr: sig.firedAtStr,
@@ -2393,12 +2389,8 @@ function collectQueuedSignals(
       hadOiData: sig.hadOiData,
     };
     if (sig.signalPhase === "BUILDING") {
-      // Queued only in the validated band: extreme enough (≤ floor) but not a
-      // mega-squeeze trap (> ceiling, where carry turns it net-negative).
-      if (
-        sig.fundingApr <= config.buildingMinFundingApr &&
-        sig.fundingApr > config.buildingMaxExtremeFundingApr
-      ) {
+      // Queued when funding ≤ floor. No ceiling (reverted to 9e34170 logic).
+      if (sig.fundingApr <= config.buildingMinFundingApr) {
         queued.push(entry);
       } else {
         blockedBuilding.push(entry);
@@ -2428,14 +2420,11 @@ function collectQueuedSignals(
 // only at HIGH/MEDIUM confidence, BUILDING only when funding ≤ threshold.
 // FUNDING never trades.
 function isOutcomeQueued(o: Outcome, config: Config): boolean {
-  if (o.signalType === "PUMP_TOP") return true;
+  if (o.signalType === "PUMP_TOP") return PUMP_TOP_QUEUEING_ENABLED;
   if (o.signalType === "SQUEEZE") {
     const sig = o.signal as unknown as SqueezeSignal;
     if (sig.signalPhase === "BUILDING") {
-      return (
-        sig.fundingApr <= config.buildingMinFundingApr &&
-        sig.fundingApr > config.buildingMaxExtremeFundingApr
-      );
+      return sig.fundingApr <= config.buildingMinFundingApr; // no ceiling
     }
     if (sig.signalPhase === "TREND_BREAK") return true;
     // EXHAUSTION — queueing SUSPENDED (see EXHAUSTION_QUEUEING_ENABLED).
@@ -3252,7 +3241,7 @@ function parseArgs(): Args {
     exhaustMaxFundingApr: parseFloat(g("--exhaust-funding", "-20")),
     exhaustMinOiDrop: parseFloat(g("--exhaust-oi-drop", "3")), // validated: 3%
     squeezeMinOiDrop: parseFloat(g("--squeeze-oi-drop", "0")), // validated: 0%
-    buildingMinFundingApr: parseFloat(g("--building-min-funding", "-180")), // Strategy B: BUILDING queued only if funding ≤ this (loosened -200→-180 2026-06-07; see CLAUDE.md)
+    buildingMinFundingApr: parseFloat(g("--building-min-funding", "-200")), // BUILDING queued only if funding ≤ this (reverted -180→-200 2026-07-02; commit-9e34170 logic)
     buildingMaxExtremeFundingApr: parseFloat(
       g("--building-max-extreme-funding", "-2000"),
     ), // Ceiling: BUILDING NOT queued if funding ≤ this (added 2026-06-14; beyond -2000% carry makes it a net loser — see CLAUDE.md/HISTORY.md)

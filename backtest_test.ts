@@ -174,11 +174,12 @@ const TESTS: TestCase[] = [
           },
         ],
       },
-      // Queued = what the executor trades: PUMP_TOP + the 2 TREND_BREAKs.
-      // FUNDING signals are excluded (informational only).
+      // Queued = what the executor trades: the 2 TREND_BREAKs. PUMP_TOP is no
+      // longer queued after the 2026-07-02 revert to the commit-9e34170 logic
+      // (EXHAUSTION in, PUMP_TOP out). FUNDING is informational only.
       queued: {
-        minSignals: 3,
-        minWins: 3,
+        minSignals: 2,
+        minWins: 2,
         mustInclude: [
           { firedAt: "2026-04-25 18:00", type: "TREND_BREAK" },
           { firedAt: "2026-04-25 21:00", type: "TREND_BREAK" },

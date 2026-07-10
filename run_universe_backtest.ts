@@ -107,13 +107,12 @@ const PARAMS = [
   // Outcome window — validated value is 24h; --lookahead overrides.
   "--lookahead",
   LOOKAHEAD ?? "24",
-  // BUILDING queue gate — validated value is -180; --building-min-funding overrides.
+  // BUILDING queue gate — reverted to -200 (commit-9e34170); overridable.
   "--building-min-funding",
-  BUILDING_MIN_FUNDING ?? "-180",
-  // BUILDING funding ceiling — validated value is -2000; override (e.g. 0 to
-  // disable) to re-study the extreme band.
+  BUILDING_MIN_FUNDING ?? "-200",
+  // BUILDING funding ceiling — DISABLED (0) after the 2026-07-02 revert; override.
   "--building-max-extreme-funding",
-  BUILDING_MAX_EXTREME ?? "-2000",
+  BUILDING_MAX_EXTREME ?? "0",
 ];
 
 interface QueuedDetail {

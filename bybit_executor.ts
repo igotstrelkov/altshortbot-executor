@@ -61,11 +61,6 @@ const RISK = {
 // sync with the KuCoin executor's exclude list.
 const EXCLUDE_COINS = new Set(["H"]);
 
-// Funding ceiling: never trade BUILDING beyond this carry extreme (mega-squeeze
-// trap — net loser after funding). Kept in sync with live_scanner and
-// kucoin_executor MAX_EXTREME_FUNDING_APR. See HISTORY.md → Funding ceiling.
-const MAX_EXTREME_FUNDING_APR = -2000;
-
 // Staleness guard: the scanner and this executor are both on Bybit, so this
 // catches a price that ran away between the scan and execution (the signal's
 // `entry` no longer describes the live market). Same threshold as the KuCoin
@@ -537,13 +532,6 @@ async function executeSignal(
     return;
   }
 
-  // Funding ceiling: BUILDING beyond -2000% APR is a net loser after carry.
-  if (signalType === "BUILDING" && fundingApr <= MAX_EXTREME_FUNDING_APR) {
-    console.log(
-      `  ${coin}: BUILDING funding ${fundingApr.toFixed(0)}% ≤ ${MAX_EXTREME_FUNDING_APR}% ceiling — skipping (mega-squeeze trap)`,
-    );
-    return;
-  }
 
   // Re-entry cooldown: do not re-short a coin that stopped out within the last
   // reentryCooldownH. Re-stacking into a still-squeezing coin is a net loser;

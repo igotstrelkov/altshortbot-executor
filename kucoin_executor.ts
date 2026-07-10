@@ -100,14 +100,6 @@ const RISK_NOTE_MULTIPLE = 1.5;
 // an explicit exclude is a clear, immediate stop.
 const EXCLUDE_COINS = new Set(["H"]);
 
-// Funding ceiling: never trade BUILDING beyond this carry extreme. The scanner
-// already won't queue these, but the executor refuses them too (defense in
-// depth, like EXCLUDE_COINS). Validated 2026-06-14: the ≤-2000% band is a net
-// loser after funding despite a high price win rate; capping it lifted
-// funding-adjusted return +228%→+526% and cut MaxDD -62%→-23% across both OOS
-// halves. Must match live_scanner MAX_EXTREME_FUNDING_APR. See HISTORY.md.
-const MAX_EXTREME_FUNDING_APR = -2000;
-
 // Venue-agreement / staleness guard: the signal's entry price comes from the
 // scanner's venue (Bybit); we trade KuCoin. If the live KuCoin price diverges
 // from the signal price by more than this fraction, the venues disagree (e.g. a
@@ -1050,14 +1042,6 @@ async function executeSignal(
     return;
   }
 
-  // Funding ceiling: BUILDING beyond -2000% APR is a net loser after carry
-  // (mega-squeeze trap). The scanner won't queue these; refuse here too.
-  if (signalType === "BUILDING" && fundingApr <= MAX_EXTREME_FUNDING_APR) {
-    console.log(
-      `  ${coin}: BUILDING funding ${fundingApr.toFixed(0)}% ≤ ${MAX_EXTREME_FUNDING_APR}% ceiling — skipping (mega-squeeze trap)`,
-    );
-    return;
-  }
 
   // Re-entry cooldown: do not re-short a coin that stopped out within the last
   // reentryCooldownH. Re-stacking into a coin that just stopped you (still

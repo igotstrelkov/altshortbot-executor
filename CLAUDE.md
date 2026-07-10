@@ -106,7 +106,7 @@ coin set and confirming win rates hold.
 --pump-pct 19 --pump-vol 5 --pump-rsi 88 --pump-funding 0
 --squeeze-pct 20 --squeeze-hours 10 --squeeze-funding -100 --squeeze-oi-drop 0
 --exhaust-funding -20 --exhaust-oi-drop 3 --lookahead 24
---building-min-funding -180 --building-max-extreme-funding -2000
+--building-min-funding -200
 ```
 
 ## Signal types and what gets queued
@@ -117,32 +117,22 @@ Five types fire from `scanCoin()`. The executor only trades the subset written t
 | Type          | Telegram        | Queued (traded)              | Condition                                      |
 | ------------- | --------------- | ---------------------------- | ---------------------------------------------- |
 | `FUNDING`     | ❌ console only | ❌ never                     | Gate 1 passes (broad-market noise)             |
-| `PUMP_TOP`    | ✅              | ✅ always                    | Large candle + volume + RSI + positive funding |
-| `BUILDING`    | ✅              | ✅ if `-2000% < fundingApr ≤ -180%` | Squeeze active, funding in the validated band  |
-| `EXHAUSTION`  | ✅              | ⛔ **SUSPENDED**             | Squeeze ending                                 |
+| `PUMP_TOP`    | ✅              | ❌ **not queued**            | Large candle + volume + RSI + positive funding |
+| `BUILDING`    | ✅              | ✅ if `fundingApr ≤ -200%`   | Squeeze active, extreme negative funding (no ceiling) |
+| `EXHAUSTION`  | ✅              | ✅ if HIGH/MEDIUM conf        | Squeeze ending (≥2h after a BUILDING)          |
 | `TREND_BREAK` | ✅              | ✅ always (always HIGH conf) | Blow-off top during uptrend                    |
 
-**EXHAUSTION queueing is suspended** — it still alerts on Telegram but is not traded. It was
-the only signal type with negative realized P&L. Controlled by `EXHAUSTION_QUEUEING_ENABLED =
-false` in `backtest_signals.ts` and the scanner's queue filter. Reversible — re-enable after
-the detector is fixed. Full rationale in `HISTORY.md`.
+> **Queue logic REVERTED 2026-07-02 to commit `9e34170` (the "major refactor" baseline).**
+> At the operator's request the 2026-06 changes were undone: **EXHAUSTION is queued again,
+> PUMP_TOP is no longer queued, the BUILDING floor is back to `-200%`, and the `-2000%` funding
+> ceiling was removed.** This was done **over** the backtest, which on identical 60-day data
+> showed the newer logic was better (+139R vs +123R — PUMP_TOP is the best bucket and EXHAUSTION
+> is ~zero R / net-negative after funding). If reverting the revert, the newer rules and their
+> rationale (funding ceiling, PUMP_TOP inclusion, `-180` floor) are in git history + HISTORY.md.
 
-BUILDING is queued in a **band**: `-2000% < fundingApr ≤ -180%` (Strategy B).
-
-- **Floor (`-180%`, `MIN_FUNDING_APR`)** — loosened from `-200%` on 2026-06-07: the
-  `-180..-200` band was the highest-win-rate marginal slice (82% win, +0.28R) and beat `-200`
-  on return in BOTH halves of a 120d out-of-sample split with matched drawdown. Looser floors
-  (`-150`/`-120`) added drawdown without robust gain — rejected; do not loosen below `-180`
-  without re-validating.
-- **Ceiling (`-2000%`, `MAX_EXTREME_FUNDING_APR`)** — added 2026-06-14. The earlier
-  "no degradation at extreme funding" claim was **win-rate only**; with integrated funding the
-  `≤-2000%` band wins most on price (80%) but is a **net loser all-in (-0.19R)** — carry
-  overwhelms the edge. Capping it lifted funding-adjusted return `+228%→+526%` and cut MaxDD
-  `-62%→-23%`, robust across BOTH out-of-sample halves with `-2000%` the best threshold in
-  each. Judge on realized P&L: re-test (return + drawdown + OOS, not win rate) before moving it.
-
-FUNDING is console-only to avoid flooding Telegram (300+/scan in broad regimes); it never
-affects positions.
+Controlled by `EXHAUSTION_QUEUEING_ENABLED = true` / `PUMP_TOP_QUEUEING_ENABLED = false` in
+`backtest_signals.ts`, the scanner's queue filter (`live_scanner.ts`), and the executor entry
+gates. FUNDING is console-only (300+/scan in broad regimes); it never affects positions.
 
 ## Do not re-investigate these
 
@@ -205,10 +195,10 @@ Restrict it to the VPS IP where possible. Only that key sits on the VPS.
 These must agree, or the backtest measures a system you are not running:
 
 1. **Detection PARAMS** — `live_scanner.ts` `PARAMS` == `backtest_signals.ts` default CLI.
-2. **Queue rules** — scanner `appendToQueue` filter == backtest `collectQueuedSignals` ==
-   executor entry gates: PUMP_TOP + TREND_BREAK + BUILDING(`-2000% < funding ≤ -180%`) queued;
-   EXHAUSTION suspended; FUNDING never. Ceiling lives in `MAX_EXTREME_FUNDING_APR`
-   (scanner + both executors) and `buildingMaxExtremeFundingApr` (backtest).
+2. **Queue rules** (reverted 2026-07-02 to commit-9e34170) — scanner `appendToQueue` filter ==
+   backtest `collectQueuedSignals` == executor entry gates: EXHAUSTION(HIGH/MED) + TREND_BREAK +
+   BUILDING(`funding ≤ -200%`, no ceiling) queued; PUMP_TOP NOT queued; FUNDING never. Toggles:
+   `EXHAUSTION_QUEUEING_ENABLED` / `PUMP_TOP_QUEUEING_ENABLED` (backtest).
 3. **Risk block** — `bybit_executor.ts` `RISK` == analysis-tool defaults
    (`stopLossPct 0.15`, `riskPerTrade 0.03`, `maxPositions 10`, `timeoutH 24`).
 
