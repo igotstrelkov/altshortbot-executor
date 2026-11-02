@@ -220,6 +220,7 @@ async function postSignalEvent(
     appendToOutbox({ event, signal }); // never rethrow
   }
 
+  if (!CONVEX_INGEST_URL_DEV) return; // dev mirror not configured → skip
   try {
     const res_dev = await fetch(CONVEX_INGEST_URL_DEV, {
       method: "POST",
@@ -232,7 +233,7 @@ async function postSignalEvent(
     if (!res_dev.ok) throw new Error(`ingest_dev ${res_dev.status}`);
   } catch (e) {
     console.error(
-      "[convex_dev] post failed, queued for retry:",
+      "[convex_dev] post failed (best-effort, not retried):",
       (e as Error).message,
     );
   }
