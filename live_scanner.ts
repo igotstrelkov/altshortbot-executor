@@ -49,7 +49,15 @@ import type { Alert, QueuedSignal } from "./shared_types.ts";
 // (executor), so every Bybit signal mis-describes the KuCoin instrument. The
 // executors also hard-exclude H and guard on venue divergence; this stops it at
 // the source so it never alerts or queues.
-const EXCLUDE_COINS = new Set(["BTC", "ETH", "BNB", "BTCDOM", "FIDA", "H"]);
+const EXCLUDE_COINS = new Set([
+  "BTC",
+  "ETH",
+  "BNB",
+  "BTCDOM",
+  "FIDA",
+  "H",
+  "ESPORTS",
+]);
 
 // Sub-penny tokens have squeeze cycles longer than the 10h detection window
 // and produce unreliable exhaustion signals. Filter them out at discovery.

@@ -54,6 +54,11 @@ const RISK = {
   // by not re-stacking into a still-squeezing coin. Costs some return in benign
   // regimes (a deliberate risk trade). Kept in sync with the KuCoin executor.
   reentryCooldownH: 24,
+  // Loss-streak block: once a coin's last N closed trades all lost money
+  // (net of funding), never trade it again. Effectively permanent — a blocked
+  // coin can't record a new win. Unblock by editing its trades out of the
+  // positions file. Untested in the backtest (operator rule, 2026-11-02).
+  lossStreakBlock: 2,
 } as const;
 
 // Coins never traded regardless of signal. H is mid-redenomination and prices
@@ -504,12 +509,31 @@ async function managePositions(store: BybitPositionStore): Promise<void> {
       console.log(
         `  ${coin}: closed (${closeReason}) ${finalPnlPct.toFixed(2)}% — $${finalPnlUsdt.toFixed(2)}`,
       );
+      if (finalPnlUsdt + (trade.fundingPaidUsdt ?? 0) < 0 && isLossStreakBlocked(store, coin)) {
+        await sendTelegram(
+          `🚫 *${coin}* blocked — last ${RISK.lossStreakBlock} trades were losses. ` +
+            `Executor will no longer trade it.`,
+        );
+      }
     } else {
       console.log(
         `  ${coin}: open ${ageH.toFixed(1)}h — px $${currentPx.toFixed(6)} — ${pnlPct.toFixed(2)}%`,
       );
     }
   }
+}
+
+// True when the coin's last RISK.lossStreakBlock closed trades were all net
+// losers (price P&L + funding < 0). See RISK.lossStreakBlock.
+function isLossStreakBlocked(store: BybitPositionStore, coin: string): boolean {
+  const recent = store.closed
+    .filter((t) => t.coin === coin)
+    .sort((a, b) => a.closedAt - b.closedAt)
+    .slice(-RISK.lossStreakBlock);
+  return (
+    recent.length === RISK.lossStreakBlock &&
+    recent.every((t) => t.pnlUsdc + (t.fundingPaidUsdt ?? 0) < 0)
+  );
 }
 
 // ─── Signal execution ──────────────────────────────────────────────────────────
@@ -529,6 +553,14 @@ async function executeSignal(
   // Hard exclude (e.g. H — redenomination chaos). Never trade these.
   if (EXCLUDE_COINS.has(coin)) {
     console.log(`  ${coin}: on executor exclude list — skipping`);
+    return;
+  }
+
+  // Loss-streak block: the coin lost money on its last N trades in a row.
+  if (isLossStreakBlocked(store, coin)) {
+    console.log(
+      `  ${coin}: last ${RISK.lossStreakBlock} trades were losses — blocked, skipping`,
+    );
     return;
   }
 
